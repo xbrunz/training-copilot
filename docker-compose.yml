@@ -20,7 +20,7 @@ services:
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./sql/00_init.sh:/docker-entrypoint-initdb.d/00_init.sh:ro
-      - ./sql/01_schema.sql:/sql/01_schema.sql:ro
+      - ./sql:/sql:ro
     ports:
       - "127.0.0.1:5433:5432"
     healthcheck:
@@ -48,7 +48,7 @@ services:
       TZ: Europe/Lisbon
       N8N_HOST: localhost
       N8N_PORT: 5678
-      WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678/}
+      N8N_WEBHOOK_URL: ${WEBHOOK_URL:-http://127.0.0.1:5678/} # Telegram rejects "localhost" in button links
       # Data governance: execution payloads contain health data, keep them short-lived
       EXECUTIONS_DATA_PRUNE: "true"
       EXECUTIONS_DATA_MAX_AGE: 168 # hours

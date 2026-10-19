@@ -21,4 +21,6 @@ REVOKE ALL ON DATABASE copilot FROM PUBLIC;
 GRANT CONNECT ON DATABASE copilot TO copilot_writer, copilot_reader;
 SQL
 
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname copilot -f /sql/01_schema.sql
+for f in /sql/0[1-9]_*.sql; do
+  psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname copilot -f "$f"
+done

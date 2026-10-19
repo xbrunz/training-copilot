@@ -4,15 +4,29 @@
   "active": false,
   "nodes": [
     {
-      "id": "a149cfb9-6dfc-5573-bb45-c90ba867eaa7",
-      "name": "Run test batch",
-      "type": "n8n-nodes-base.manualTrigger",
-      "typeVersion": 1,
+      "id": "dc5894ab-129f-5f97-a504-1a9f54de768f",
+      "name": "Start test batch",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
       "position": [
         0,
         0
       ],
-      "parameters": {}
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "training-copilot-test-batch",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "webhookId": "training-copilot-test-batch",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "testRunnerToken1",
+          "name": "Test runner token"
+        }
+      },
+      "notes": "127.0.0.1 only, X-Test-Token header required. See scripts/run_batch.sh"
     },
     {
       "id": "fdfbd6fb-8f5b-5959-a5d6-452d3733e0e6",
@@ -24,7 +38,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "// Every sample scenario, plus one live run (empty scenario_id)\nconst ids = [\"s01_good_recovery_intervals\", \"s02_low_hrv_hard_day\", \"s03_short_sleep_hard_day\", \"s04_load_spike\", \"s05_rain_long_ride\", \"s06_planned_rest_day\", \"s07_high_fatigue\", \"s08_missing_wellness\", \"s09_elevated_rhr\", \"s10_no_rest_12_days\"];\nconst guardrails_file = 'guardrails.json'; // 'guardrails.test.json' = loop-mechanics test only\nreturn [...ids, ''].map((scenario_id) => ({ json: { scenario_id, guardrails_file } }));"
+        "jsCode": "// ?scenarios=all | live | comma-separated IDs; ?guardrails=guardrails.json | guardrails.test.json\nconst all = [\"s01_good_recovery_intervals\", \"s02_low_hrv_hard_day\", \"s03_short_sleep_hard_day\", \"s04_load_spike\", \"s05_rain_long_ride\", \"s06_planned_rest_day\", \"s07_high_fatigue\", \"s08_missing_wellness\", \"s09_elevated_rhr\", \"s10_no_rest_12_days\"];\nconst q = $input.first().json.query || {};\nconst want = String(q.scenarios || 'all');\nconst ids = want === 'all' ? [...all, ''] : want.split(',').map((s) => (s === 'live' ? '' : s.trim()));\nconst unknown = ids.filter((id) => id && !all.includes(id));\nif (unknown.length) throw new Error(`Unknown scenarios: ${unknown.join(', ')}`);\nconst guardrails_file = q.guardrails || 'guardrails.json';\nreturn ids.map((scenario_id) => ({ json: { scenario_id, guardrails_file } }));"
       }
     },
     {
@@ -74,13 +88,27 @@
         },
         "mode": "each",
         "options": {
-          "waitForSubWorkflow": true
+          "waitForSubWorkflow": false
         }
+      },
+      "notes": "Fire and forget: each run waits for its own Telegram answer"
+    },
+    {
+      "id": "038a0907-cd24-5519-98a2-355a7762a8fb",
+      "name": "Batch started",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: { started: $input.all().length, scenarios: $('Scenario list').all().map((i) => i.json.scenario_id || 'live') } }];"
       }
     }
   ],
   "connections": {
-    "Run test batch": {
+    "Start test batch": {
       "main": [
         [
           {
@@ -96,6 +124,17 @@
         [
           {
             "node": "Run Training Copilot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Training Copilot": {
+      "main": [
+        [
+          {
+            "node": "Batch started",
             "type": "main",
             "index": 0
           }

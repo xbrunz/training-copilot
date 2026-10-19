@@ -25,6 +25,8 @@ optional = {
                           "data": {"name": "x-api-key", "value": None}},
     "TELEGRAM_BOT_TOKEN": {"id": "telegramBot00001", "name": "Telegram bot", "type": "telegramApi",
                            "data": {"accessToken": None}},
+    "TEST_RUNNER_TOKEN": {"id": "testRunnerToken1", "name": "Test runner token", "type": "httpHeaderAuth",
+                          "data": {"name": "X-Test-Token", "value": None}},
 }
 for key, cred in optional.items():
     if env.get(key):

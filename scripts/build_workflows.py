@@ -15,7 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 CODE = ROOT / "workflows" / "code"
 MAIN_ID = "TrainCopilotMain"
 RUNNER_ID = "TrainCopilotTest"
-VERSION = "v0.3-maker-checker"
+VERSION = "v0.4-hitl-logging"
 
 CRED_INTERVALS = {"httpBasicAuth": {"id": "intervalsApiKey1", "name": "intervals.icu API key"}}
 CRED_ANTHROPIC = {"httpHeaderAuth": {"id": "anthropicApiKey1", "name": "Anthropic API key"}}
@@ -198,6 +198,110 @@ return [{ json: { run: s.run, context: s.context, rules_version: s.rules_version
 """
 
 
+CRED_PG = {"postgres": {"id": "pgCopilotWriter1", "name": "Postgres copilot_writer"}}
+CRED_TG = {"telegramApi": {"id": "telegramBot00001", "name": "Telegram bot"}}
+
+# One atomic statement per log write: the run, every LLM call, every verdict
+SQL_LOG_PROPOSAL = """WITH p AS (SELECT $1::jsonb AS j),
+run AS (
+  INSERT INTO agent_runs (n8n_execution_id, workflow_version, rules_version, trigger, data_source, scenario_id,
+                          target_date, status, started_at, proposal_ready_at, context, maker_attempts,
+                          used_fallback, final_proposal)
+  SELECT j#>>'{run,n8n_execution_id}', j#>>'{run,workflow_version}', j->>'rules_version', j#>>'{run,trigger}',
+         j#>>'{run,data_source}', j#>>'{run,scenario_id}', (j#>>'{run,target_date}')::date, 'awaiting_human',
+         (j#>>'{run,run_started_at}')::timestamptz, now(), j->'context',
+         jsonb_array_length(j->'attempts')::smallint, j#>>'{final,origin}' = 'fallback', j#>'{final,proposal}'
+  FROM p
+  RETURNING run_id
+),
+attempts AS (SELECT a FROM p, jsonb_array_elements(p.j->'attempts') a),
+calls AS (
+  INSERT INTO llm_calls (run_id, attempt, model, started_at, latency_ms, input_tokens, output_tokens,
+                         stop_reason, proposal, error)
+  SELECT run.run_id, (a->>'attempt')::smallint, a#>>'{call,model}', (a#>>'{call,started_at}')::timestamptz,
+         (a#>>'{call,latency_ms}')::int, (a#>>'{call,input_tokens}')::int, (a#>>'{call,output_tokens}')::int,
+         a#>>'{call,stop_reason}', NULLIF(a->'proposal', 'null'::jsonb), a#>>'{call,error}'
+  FROM run, attempts
+  RETURNING call_id, run_id, attempt
+),
+verdicts AS (
+  INSERT INTO checker_verdicts (run_id, call_id, attempt, passed, violations)
+  SELECT c.run_id, c.call_id, c.attempt, (a#>>'{verdict,passed}')::boolean, a#>'{verdict,violations}'
+  FROM calls c JOIN attempts ON (a->>'attempt')::smallint = c.attempt
+  UNION ALL
+  SELECT run.run_id, NULL, (jsonb_array_length(j->'attempts') + 1)::smallint,
+         (j#>>'{final,verdict,passed}')::boolean, j#>'{final,verdict,violations}'
+  FROM run, p WHERE j#>>'{final,origin}' = 'fallback'
+  RETURNING 1
+)
+SELECT run_id, (SELECT count(*) FROM calls) AS calls_logged, (SELECT count(*) FROM verdicts) AS verdicts_logged
+FROM run;"""
+
+SQL_LOG_DECISION = """WITH p AS (SELECT $1::jsonb AS j),
+d AS (
+  INSERT INTO human_decisions (run_id, channel, requested_at, decided_at, decision, telegram_message_id)
+  SELECT (j->>'run_id')::uuid, 'telegram', (j->>'requested_at')::timestamptz,
+         CASE WHEN j->>'decision' = 'no_response' THEN NULL ELSE now() END,
+         j->>'decision', (j->>'telegram_message_id')::bigint
+  FROM p
+  RETURNING run_id
+),
+s AS (
+  INSERT INTO planned_sessions (run_id, session_date, sport, duration_min, intensity, location, focus, origin)
+  SELECT (j->>'run_id')::uuid, (j->>'target_date')::date, j#>>'{session,sport}',
+         (j#>>'{session,duration_min}')::smallint, j#>>'{session,intensity}', j#>>'{session,location}',
+         j#>>'{session,focus}', j->>'origin'
+  FROM p WHERE jsonb_typeof(j->'session') = 'object'
+  RETURNING run_id
+),
+r AS (
+  UPDATE agent_runs SET status = 'completed', finished_at = now()
+  WHERE run_id = (SELECT (j->>'run_id')::uuid FROM p)
+  RETURNING run_id
+)
+SELECT (SELECT count(*) FROM d) AS decisions, (SELECT count(*) FROM s) AS sessions,
+       (SELECT count(*) FROM r) AS runs_closed;"""
+
+BUILD_APPROVAL = """
+// --- n8n wrapper: message text + three signed resume-URL buttons
+const s = $('Proposal ready').first().json;
+const settings = $input.first().json.data;
+return [{ json: {
+  run_id: $('Log proposal').first().json.run_id,
+  chat_id: String(settings.telegram_chat_id),
+  timeout_min: Number(settings.approval_timeout_min) || 180,
+  requested_at: new Date().toISOString(),
+  text: formatApproval(s),
+  buttons: approvalButtons($execution.resumeUrl),
+} }];
+"""
+
+APPLY_DECISION = """
+// --- n8n wrapper: resumed by a button (query.decision) or by the timeout (no query)
+const s = $('Proposal ready').first().json;
+const req = $('Build approval message').first().json;
+const sent = $('Ask for approval').first().json;
+const query = $input.first().json.query;
+const result = applyDecision(query ? query.decision : null, s.final.proposal);
+const labels = { approve: '✅ Approved', lighter: '🪶 Lighter', rest: '😴 Rest', no_response: '⌛ No answer' };
+const outcome = result.session
+  ? `${labels[result.decision]} → <b>${result.session.sport === 'rest' ? 'Rest' : `${result.session.sport} · ${result.session.duration_min} min · ${result.session.intensity} · ${result.session.location}`}</b>`
+  : `${labels.no_response} within ${req.timeout_min} min: nothing scheduled`;
+return [{ json: {
+  run_id: req.run_id, target_date: s.run.target_date, requested_at: req.requested_at,
+  decision: result.decision, session: result.session, origin: result.origin || s.final.origin,
+  telegram_message_id: (sent.result || sent).message_id, chat_id: req.chat_id,
+  resumed_by_button: !!query,
+  confirmation: `${req.text}\\n\\n<b>Decision:</b> ${outcome}`,
+} }];
+"""
+
+RESPONSE_PAGE = ("=<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+                 "<body style='font-family:system-ui;padding:2rem'><h2>{{ $('Apply decision').first().json.decision"
+                 " === 'approve' ? '✅ Approved' : $('Apply decision').first().json.decision === 'lighter'"
+                 " ? '🪶 Lighter session' : '😴 Rest day' }}</h2><p>Recorded. You can close this tab.</p>")
+
+
 def main_workflow():
     f = Flow()
     f.sticky("## 1 · Collect\nRecovery and load (intervals.icu), weather (Open-Meteo), weekly plan. "
@@ -322,21 +426,91 @@ def main_workflow():
     f.link("Maker call failed", "Safe fallback")
     f.link("Accept agent proposal", "Proposal ready")
     f.link("Safe fallback", "Proposal ready")
+
+    # --- 3 · Human approval + audit log
+    f.sticky("## 3 · Human in the loop + audit log\nThe run, every LLM call and verdict are logged before asking. "
+             "Telegram buttons resume this execution via its signed URL. Nothing is scheduled without an answer.",
+             (4780, -260), (2620, 760), color=6)
+    f.node("Log proposal", "postgres", 2.5, (4840, 80), {
+        "operation": "executeQuery", "query": SQL_LOG_PROPOSAL,
+        "options": {"queryReplacement": "={{ [JSON.stringify($json)] }}"}},
+        credentials=CRED_PG, notes="Atomic: run + LLM calls + verdicts")
+    f.node("Read settings", "readWriteFile", 1, (5040, 80),
+           {"operation": "read", "fileSelector": "/data/private/settings.json", "options": {}},
+           notes="Chat ID lives outside the repo")
+    f.node("Parse settings", "extractFromFile", 1, (5240, 80), {"operation": "fromJson", "options": {}})
+    f.node("Build approval message", "code", 2, (5440, 80), code(js("approval.js") + BUILD_APPROVAL))
+    btn = lambda i: {"text": f"={{{{ $json.buttons[{i}].text }}}}", "additionalFields": {"url": f"={{{{ $json.buttons[{i}].url }}}}"}}
+    f.node("Ask for approval", "telegram", 1.2, (5640, 80), {
+        "chatId": "={{ $json.chat_id }}", "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {"rows": [{"row": {"buttons": [btn(0), btn(1), btn(2)]}}]},
+        "additionalFields": {"parse_mode": "HTML", "appendAttribution": False}},
+        credentials=CRED_TG, **RETRY)
+    f.node("Wait for decision", "wait", 1.1, (5840, 80), {
+        "resume": "webhook", "httpMethod": "GET", "responseMode": "responseNode",
+        "limitWaitTime": True, "limitType": "afterTimeInterval",
+        "resumeAmount": "={{ $('Build approval message').first().json.timeout_min }}", "resumeUnit": "minutes",
+        "options": {}}, notes="Resumes on a button tap, or after the timeout")
+    f.node("Apply decision", "code", 2, (6040, 80), code(js("approval.js") + APPLY_DECISION))
+    f.node("Log decision", "postgres", 2.5, (6240, 80), {
+        "operation": "executeQuery", "query": SQL_LOG_DECISION,
+        "options": {"queryReplacement": "={{ [JSON.stringify($json)] }}"}},
+        credentials=CRED_PG, notes="Decision is insert-only")
+    f.node("Answered by button?", "if", 2.2, (6440, 80), {
+        "conditions": {"options": {"caseSensitive": True, "leftValue": "", "typeValidation": "strict", "version": 2},
+                       "conditions": [{"id": "btn", "leftValue": "={{ $('Apply decision').first().json.resumed_by_button }}",
+                                       "rightValue": True,
+                                       "operator": {"type": "boolean", "operation": "true", "singleValue": True}}],
+                       "combinator": "and"}, "options": {}})
+    f.node("Show confirmation page", "respondToWebhook", 1.1, (6660, -20), {
+        "respondWith": "text", "responseBody": RESPONSE_PAGE,
+        "options": {"responseHeaders": {"entries": [{"name": "content-type", "value": "text/html; charset=utf-8"}]}}})
+    f.node("Update Telegram message", "telegram", 1.2, (6880, 80), {
+        "resource": "message", "operation": "editMessageText", "messageType": "message",
+        "chatId": "={{ $('Apply decision').first().json.chat_id }}",
+        "messageId": "={{ $('Apply decision').first().json.telegram_message_id }}",
+        "text": "={{ $('Apply decision').first().json.confirmation }}",
+        "additionalFields": {"parse_mode": "HTML"}},
+        credentials=CRED_TG, **RETRY, notes="Shows the decision and removes the buttons")
+
+    f.link("Proposal ready", "Log proposal")
+    f.link("Log proposal", "Read settings")
+    f.link("Read settings", "Parse settings")
+    f.link("Parse settings", "Build approval message")
+    f.link("Build approval message", "Ask for approval")
+    f.link("Ask for approval", "Wait for decision")
+    f.link("Wait for decision", "Apply decision")
+    f.link("Apply decision", "Log decision")
+    f.link("Log decision", "Answered by button?")
+    f.link("Answered by button?", "Show confirmation page", 0)
+    f.link("Answered by button?", "Update Telegram message", 1)
+    f.link("Show confirmation page", "Update Telegram message")
     return {"id": MAIN_ID, "name": "Training Copilot", "active": False, "nodes": f.nodes,
             "connections": f.connections, "pinData": {},
             "settings": {"executionOrder": "v1", "timezone": "Europe/Lisbon",
                          "callerPolicy": "workflowsFromSameOwner"}}
 
 
-def runner_workflow(guardrails_file="guardrails.json"):
+def runner_workflow():
     scenarios = sorted(p.stem for p in (ROOT / "data" / "sample" / "scenarios").glob("s*.json"))
     f = Flow()
-    f.node("Run test batch", "manualTrigger", 1, (0, 0))
+    f.node("Start test batch", "webhook", 2, (0, 0), {
+        "httpMethod": "GET", "path": "training-copilot-test-batch", "authentication": "headerAuth",
+        "responseMode": "lastNode", "options": {}},
+        webhookId="training-copilot-test-batch",
+        credentials={"httpHeaderAuth": {"id": "testRunnerToken1", "name": "Test runner token"}},
+        notes="127.0.0.1 only, X-Test-Token header required. See scripts/run_batch.sh")
     f.node("Scenario list", "code", 2, (220, 0), code(
-        "// Every sample scenario, plus one live run (empty scenario_id)\n"
-        f"const ids = {json.dumps(scenarios)};\n"
-        f"const guardrails_file = '{guardrails_file}'; // 'guardrails.test.json' = loop-mechanics test only\n"
-        "return [...ids, ''].map((scenario_id) => ({ json: { scenario_id, guardrails_file } }));"))
+        "// ?scenarios=all | live | comma-separated IDs; ?guardrails=guardrails.json | guardrails.test.json\n"
+        f"const all = {json.dumps(scenarios)};\n"
+        "const q = $input.first().json.query || {};\n"
+        "const want = String(q.scenarios || 'all');\n"
+        "const ids = want === 'all' ? [...all, ''] : want.split(',').map((s) => (s === 'live' ? '' : s.trim()));\n"
+        "const unknown = ids.filter((id) => id && !all.includes(id));\n"
+        "if (unknown.length) throw new Error(`Unknown scenarios: ${unknown.join(', ')}`);\n"
+        "const guardrails_file = q.guardrails || 'guardrails.json';\n"
+        "return ids.map((scenario_id) => ({ json: { scenario_id, guardrails_file } }));"))
     f.node("Run Training Copilot", "executeWorkflow", 1.2, (440, 0), {
         "workflowId": {"__rl": True, "value": MAIN_ID, "mode": "id"},
         "workflowInputs": {"mappingMode": "defineBelow", "value": {"scenario_id": "={{ $json.scenario_id }}",
@@ -345,18 +519,20 @@ def runner_workflow(guardrails_file="guardrails.json"):
                            "schema": [{"id": k, "displayName": k, "required": False, "defaultMatch": False,
                                        "display": True, "canBeUsedToMatch": True, "type": "string"}
                                       for k in ("scenario_id", "guardrails_file")]},
-        "mode": "each", "options": {"waitForSubWorkflow": True}})
-    f.link("Run test batch", "Scenario list")
+        "mode": "each", "options": {"waitForSubWorkflow": False}},
+        notes="Fire and forget: each run waits for its own Telegram answer")
+    f.node("Batch started", "code", 2, (660, 0), code(
+        "return [{ json: { started: $input.all().length, scenarios: $('Scenario list').all().map((i) => i.json.scenario_id || 'live') } }];"))
+    f.link("Start test batch", "Scenario list")
     f.link("Scenario list", "Run Training Copilot")
+    f.link("Run Training Copilot", "Batch started")
     return {"id": RUNNER_ID, "name": "Training Copilot · test runner", "active": False, "nodes": f.nodes,
             "connections": f.connections, "pinData": {},
             "settings": {"executionOrder": "v1", "timezone": "Europe/Lisbon"}}
 
 
 if __name__ == "__main__":
-    import sys
     out = ROOT / "workflows"
-    runner_cfg = "guardrails.test.json" if "--test-guardrails" in sys.argv else "guardrails.json"
-    for name, wf in [("training-copilot.json", main_workflow()), ("test-runner.json", runner_workflow(runner_cfg))]:
+    for name, wf in [("training-copilot.json", main_workflow()), ("test-runner.json", runner_workflow())]:
         (out / name).write_text(json.dumps(wf, indent=2) + "\n")
         print(f"wrote workflows/{name}: {len(wf['nodes'])} nodes")

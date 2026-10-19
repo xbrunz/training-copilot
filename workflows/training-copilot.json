@@ -110,7 +110,7 @@
         80
       ],
       "parameters": {
-        "jsCode": "// Normalise the three entry points into one run config\nconst input = $input.first().json;\nconst scenarioId = input.scenario_id ? String(input.scenario_id) : null;\n// Guardrail on input: scenario IDs become file paths, so allow a strict pattern only\nif (scenarioId && !/^s[0-9]{2}_[a-z0-9_]{1,40}$/.test(scenarioId)) {\n  throw new Error(`Invalid scenario_id: ${scenarioId}`);\n}\n// Only two config files exist; anything else is refused\nconst guardrailsFile = input.guardrails_file || 'guardrails.json';\nif (!['guardrails.json', 'guardrails.test.json'].includes(guardrailsFile)) {\n  throw new Error(`Invalid guardrails_file: ${guardrailsFile}`);\n}\nconst lisbon = $now.setZone('Europe/Lisbon');\nreturn [{ json: {\n  workflow_version: 'v0.3-maker-checker',\n  n8n_execution_id: $execution.id,\n  run_started_at: new Date().toISOString(),\n  trigger: $('Every day 21:00').isExecuted ? 'schedule' : 'manual',\n  mode: scenarioId ? 'scenario' : 'live',\n  scenario_id: scenarioId,\n  guardrails_file: guardrailsFile,\n  today: lisbon.toISODate(),\n  target_date: lisbon.plus({ days: 1 }).toISODate(),\n} }];\n"
+        "jsCode": "// Normalise the three entry points into one run config\nconst input = $input.first().json;\nconst scenarioId = input.scenario_id ? String(input.scenario_id) : null;\n// Guardrail on input: scenario IDs become file paths, so allow a strict pattern only\nif (scenarioId && !/^s[0-9]{2}_[a-z0-9_]{1,40}$/.test(scenarioId)) {\n  throw new Error(`Invalid scenario_id: ${scenarioId}`);\n}\n// Only two config files exist; anything else is refused\nconst guardrailsFile = input.guardrails_file || 'guardrails.json';\nif (!['guardrails.json', 'guardrails.test.json'].includes(guardrailsFile)) {\n  throw new Error(`Invalid guardrails_file: ${guardrailsFile}`);\n}\nconst lisbon = $now.setZone('Europe/Lisbon');\nreturn [{ json: {\n  workflow_version: 'v0.4-hitl-logging',\n  n8n_execution_id: $execution.id,\n  run_started_at: new Date().toISOString(),\n  trigger: $('Every day 21:00').isExecuted ? 'schedule' : 'manual',\n  mode: scenarioId ? 'scenario' : 'live',\n  scenario_id: scenarioId,\n  guardrails_file: guardrailsFile,\n  today: lisbon.toISODate(),\n  target_date: lisbon.plus({ days: 1 }).toISODate(),\n} }];\n"
       }
     },
     {
@@ -637,6 +637,292 @@
         80
       ],
       "parameters": {}
+    },
+    {
+      "id": "e15c5b71-42c5-5261-a48e-e40fe86e2ff6",
+      "name": "Note: ## 3 \u00b7 Human in the loop + audit log",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        4780,
+        -260
+      ],
+      "parameters": {
+        "content": "## 3 \u00b7 Human in the loop + audit log\nThe run, every LLM call and verdict are logged before asking. Telegram buttons resume this execution via its signed URL. Nothing is scheduled without an answer.",
+        "width": 2620,
+        "height": 760,
+        "color": 6
+      }
+    },
+    {
+      "id": "333e0a0c-940c-5d6a-a029-fa819f116223",
+      "name": "Log proposal",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4840,
+        80
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH p AS (SELECT $1::jsonb AS j),\nrun AS (\n  INSERT INTO agent_runs (n8n_execution_id, workflow_version, rules_version, trigger, data_source, scenario_id,\n                          target_date, status, started_at, proposal_ready_at, context, maker_attempts,\n                          used_fallback, final_proposal)\n  SELECT j#>>'{run,n8n_execution_id}', j#>>'{run,workflow_version}', j->>'rules_version', j#>>'{run,trigger}',\n         j#>>'{run,data_source}', j#>>'{run,scenario_id}', (j#>>'{run,target_date}')::date, 'awaiting_human',\n         (j#>>'{run,run_started_at}')::timestamptz, now(), j->'context',\n         jsonb_array_length(j->'attempts')::smallint, j#>>'{final,origin}' = 'fallback', j#>'{final,proposal}'\n  FROM p\n  RETURNING run_id\n),\nattempts AS (SELECT a FROM p, jsonb_array_elements(p.j->'attempts') a),\ncalls AS (\n  INSERT INTO llm_calls (run_id, attempt, model, started_at, latency_ms, input_tokens, output_tokens,\n                         stop_reason, proposal, error)\n  SELECT run.run_id, (a->>'attempt')::smallint, a#>>'{call,model}', (a#>>'{call,started_at}')::timestamptz,\n         (a#>>'{call,latency_ms}')::int, (a#>>'{call,input_tokens}')::int, (a#>>'{call,output_tokens}')::int,\n         a#>>'{call,stop_reason}', NULLIF(a->'proposal', 'null'::jsonb), a#>>'{call,error}'\n  FROM run, attempts\n  RETURNING call_id, run_id, attempt\n),\nverdicts AS (\n  INSERT INTO checker_verdicts (run_id, call_id, attempt, passed, violations)\n  SELECT c.run_id, c.call_id, c.attempt, (a#>>'{verdict,passed}')::boolean, a#>'{verdict,violations}'\n  FROM calls c JOIN attempts ON (a->>'attempt')::smallint = c.attempt\n  UNION ALL\n  SELECT run.run_id, NULL, (jsonb_array_length(j->'attempts') + 1)::smallint,\n         (j#>>'{final,verdict,passed}')::boolean, j#>'{final,verdict,violations}'\n  FROM run, p WHERE j#>>'{final,origin}' = 'fallback'\n  RETURNING 1\n)\nSELECT run_id, (SELECT count(*) FROM calls) AS calls_logged, (SELECT count(*) FROM verdicts) AS verdicts_logged\nFROM run;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgCopilotWriter1",
+          "name": "Postgres copilot_writer"
+        }
+      },
+      "notes": "Atomic: run + LLM calls + verdicts"
+    },
+    {
+      "id": "8a818609-8593-506c-9a2b-6e662e97d227",
+      "name": "Read settings",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        5040,
+        80
+      ],
+      "parameters": {
+        "operation": "read",
+        "fileSelector": "/data/private/settings.json",
+        "options": {}
+      },
+      "notes": "Chat ID lives outside the repo"
+    },
+    {
+      "id": "697482e7-2d56-568b-9b57-81d9d9d34225",
+      "name": "Parse settings",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        5240,
+        80
+      ],
+      "parameters": {
+        "operation": "fromJson",
+        "options": {}
+      }
+    },
+    {
+      "id": "77fd5d8c-5115-5e8e-8596-78c012018f85",
+      "name": "Build approval message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5440,
+        80
+      ],
+      "parameters": {
+        "jsCode": "// Human-in-the-loop: the approval message and what each answer does.\n// Nothing is scheduled until a human answers; no answer means no action.\n\nconst DECISIONS = ['approve', 'lighter', 'rest'];\nconst PRICE_PER_MTOK = { 'claude-haiku-5-5': { input: 0.1, output: 0.5 } }; // display only; Postgres model_pricing is the source of truth\nconst REST = { sport: 'rest', duration_min: 0, intensity: 'easy', location: 'none', focus: 'Rest day' };\n\nfunction esc(s) {\n  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n}\n\nfunction runCost(attempts) {\n  let input = 0, output = 0, usd = 0;\n  for (const a of attempts) {\n    const c = a.call || {};\n    const p = PRICE_PER_MTOK[c.model];\n    input += c.input_tokens || 0;\n    output += c.output_tokens || 0;\n    if (p) usd += ((c.input_tokens || 0) * p.input + (c.output_tokens || 0) * p.output) / 1e6;\n  }\n  return { input, output, usd };\n}\n\nfunction describe(s) {\n  if (!s || s.sport === 'rest') return 'Rest';\n  return `${s.sport} \u00b7 ${s.duration_min} min \u00b7 ${s.intensity} \u00b7 ${s.location}`;\n}\n\nfunction formatApproval({ run, context, final, attempts }) {\n  const p = final.proposal;\n  const r = context.recovery, l = context.load, w = context.weather;\n  const cost = runCost(attempts);\n  const rejections = attempts.filter((a) => !a.verdict.passed).length;\n  const lines = [\n    `<b>Training Copilot \u00b7 ${esc(run.target_date)} (${esc(context.weekday)})</b>`,\n    run.data_source === 'scenario' ? `<i>Test scenario: ${esc(run.scenario_id)}</i>` : '',\n    '',\n    `<b>Proposed:</b> ${esc(describe(p))}`,\n    p.sport !== 'rest' ? `<b>Focus:</b> ${esc(p.focus)}` : '',\n    `<b>Planned:</b> ${esc(describe(context.planned))}`,\n    '',\n    `<b>Why:</b> ${esc(p.rationale)}`,\n    '',\n    `HRV ${r.hrv_vs_baseline_pct ?? 'n/a'}% vs baseline \u00b7 RHR ${r.resting_hr_vs_baseline_bpm ?? 'n/a'} bpm \u00b7 sleep ${r.sleep_hours ?? 'n/a'} h`,\n    `TSB ${l.tsb ?? 'n/a'} \u00b7 load ${l.load_change_pct ?? 'n/a'}% wk/wk \u00b7 ${l.days_since_rest} days since rest`,\n    `Weather: ${w.temp_min_c ?? '?'}\u2013${w.temp_max_c ?? '?'}\u00b0C, rain ${w.precip_mm ?? '?'} mm, gusts ${w.gust_max_kmh ?? '?'} km/h`,\n    '',\n    final.origin === 'fallback'\n      ? `\u26a0\ufe0f <b>Safe fallback</b> (agent failed after ${attempts.length} attempt${attempts.length > 1 ? 's' : ''})`\n      : `\u2705 Passed guardrails${rejections ? ` after ${rejections} rejection${rejections > 1 ? 's' : ''}` : ''}`,\n    `<i>${attempts.length} LLM call${attempts.length > 1 ? 's' : ''} \u00b7 ${cost.input}+${cost.output} tokens \u00b7 $${cost.usd.toFixed(5)}</i>`,\n  ];\n  return lines.filter((x, i, a) => x !== '' || a[i - 1] !== '').join('\\n').trim();\n}\n\n// Buttons are links to this execution's signed resume URL\nfunction approvalButtons(resumeUrl) {\n  const sep = resumeUrl.includes('?') ? '&' : '?';\n  const labels = { approve: '\u2705 Approve', lighter: '\ud83e\udeb6 Lighter', rest: '\ud83d\ude34 Rest' };\n  return DECISIONS.map((d) => ({ text: labels[d], url: `${resumeUrl}${sep}decision=${d}` }));\n}\n\nconst STEP_DOWN = { hard: 'moderate', moderate: 'easy' };\n\n// Deterministic: the human picks, code applies. \"Lighter\" = one intensity level\n// down; an easy session becomes rest.\nfunction applyDecision(decision, proposal) {\n  if (decision == null) return { decision: 'no_response', session: null, origin: null };\n  if (!DECISIONS.includes(decision)) throw new Error(`Unknown decision: ${decision}`);\n  if (decision === 'approve') return { decision, session: proposal, origin: null };\n  if (decision === 'rest' || proposal.sport === 'rest' || !STEP_DOWN[proposal.intensity]) {\n    return { decision, session: { ...REST }, origin: 'human_rest' };\n  }\n  return {\n    decision,\n    session: { ...proposal, intensity: STEP_DOWN[proposal.intensity], focus: `${proposal.focus} (lighter)` },\n    origin: 'human_lighter',\n  };\n}\n\n\n// --- n8n wrapper: message text + three signed resume-URL buttons\nconst s = $('Proposal ready').first().json;\nconst settings = $input.first().json.data;\nreturn [{ json: {\n  run_id: $('Log proposal').first().json.run_id,\n  chat_id: String(settings.telegram_chat_id),\n  timeout_min: Number(settings.approval_timeout_min) || 180,\n  requested_at: new Date().toISOString(),\n  text: formatApproval(s),\n  buttons: approvalButtons($execution.resumeUrl),\n} }];\n"
+      }
+    },
+    {
+      "id": "8598f06c-ae42-5168-b28c-fa624e56ea15",
+      "name": "Ask for approval",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        5640,
+        80
+      ],
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.buttons[0].text }}",
+                    "additionalFields": {
+                      "url": "={{ $json.buttons[0].url }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.buttons[1].text }}",
+                    "additionalFields": {
+                      "url": "={{ $json.buttons[1].url }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.buttons[2].text }}",
+                    "additionalFields": {
+                      "url": "={{ $json.buttons[2].url }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "telegramBot00001",
+          "name": "Telegram bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "f39d54f9-18fd-5925-9c9a-d39ce634ab8f",
+      "name": "Wait for decision",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        5840,
+        80
+      ],
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "GET",
+        "responseMode": "responseNode",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": "={{ $('Build approval message').first().json.timeout_min }}",
+        "resumeUnit": "minutes",
+        "options": {}
+      },
+      "notes": "Resumes on a button tap, or after the timeout"
+    },
+    {
+      "id": "964beebe-003b-58bb-9cbb-3fb3d14e4d26",
+      "name": "Apply decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6040,
+        80
+      ],
+      "parameters": {
+        "jsCode": "// Human-in-the-loop: the approval message and what each answer does.\n// Nothing is scheduled until a human answers; no answer means no action.\n\nconst DECISIONS = ['approve', 'lighter', 'rest'];\nconst PRICE_PER_MTOK = { 'claude-haiku-5-5': { input: 0.1, output: 0.5 } }; // display only; Postgres model_pricing is the source of truth\nconst REST = { sport: 'rest', duration_min: 0, intensity: 'easy', location: 'none', focus: 'Rest day' };\n\nfunction esc(s) {\n  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n}\n\nfunction runCost(attempts) {\n  let input = 0, output = 0, usd = 0;\n  for (const a of attempts) {\n    const c = a.call || {};\n    const p = PRICE_PER_MTOK[c.model];\n    input += c.input_tokens || 0;\n    output += c.output_tokens || 0;\n    if (p) usd += ((c.input_tokens || 0) * p.input + (c.output_tokens || 0) * p.output) / 1e6;\n  }\n  return { input, output, usd };\n}\n\nfunction describe(s) {\n  if (!s || s.sport === 'rest') return 'Rest';\n  return `${s.sport} \u00b7 ${s.duration_min} min \u00b7 ${s.intensity} \u00b7 ${s.location}`;\n}\n\nfunction formatApproval({ run, context, final, attempts }) {\n  const p = final.proposal;\n  const r = context.recovery, l = context.load, w = context.weather;\n  const cost = runCost(attempts);\n  const rejections = attempts.filter((a) => !a.verdict.passed).length;\n  const lines = [\n    `<b>Training Copilot \u00b7 ${esc(run.target_date)} (${esc(context.weekday)})</b>`,\n    run.data_source === 'scenario' ? `<i>Test scenario: ${esc(run.scenario_id)}</i>` : '',\n    '',\n    `<b>Proposed:</b> ${esc(describe(p))}`,\n    p.sport !== 'rest' ? `<b>Focus:</b> ${esc(p.focus)}` : '',\n    `<b>Planned:</b> ${esc(describe(context.planned))}`,\n    '',\n    `<b>Why:</b> ${esc(p.rationale)}`,\n    '',\n    `HRV ${r.hrv_vs_baseline_pct ?? 'n/a'}% vs baseline \u00b7 RHR ${r.resting_hr_vs_baseline_bpm ?? 'n/a'} bpm \u00b7 sleep ${r.sleep_hours ?? 'n/a'} h`,\n    `TSB ${l.tsb ?? 'n/a'} \u00b7 load ${l.load_change_pct ?? 'n/a'}% wk/wk \u00b7 ${l.days_since_rest} days since rest`,\n    `Weather: ${w.temp_min_c ?? '?'}\u2013${w.temp_max_c ?? '?'}\u00b0C, rain ${w.precip_mm ?? '?'} mm, gusts ${w.gust_max_kmh ?? '?'} km/h`,\n    '',\n    final.origin === 'fallback'\n      ? `\u26a0\ufe0f <b>Safe fallback</b> (agent failed after ${attempts.length} attempt${attempts.length > 1 ? 's' : ''})`\n      : `\u2705 Passed guardrails${rejections ? ` after ${rejections} rejection${rejections > 1 ? 's' : ''}` : ''}`,\n    `<i>${attempts.length} LLM call${attempts.length > 1 ? 's' : ''} \u00b7 ${cost.input}+${cost.output} tokens \u00b7 $${cost.usd.toFixed(5)}</i>`,\n  ];\n  return lines.filter((x, i, a) => x !== '' || a[i - 1] !== '').join('\\n').trim();\n}\n\n// Buttons are links to this execution's signed resume URL\nfunction approvalButtons(resumeUrl) {\n  const sep = resumeUrl.includes('?') ? '&' : '?';\n  const labels = { approve: '\u2705 Approve', lighter: '\ud83e\udeb6 Lighter', rest: '\ud83d\ude34 Rest' };\n  return DECISIONS.map((d) => ({ text: labels[d], url: `${resumeUrl}${sep}decision=${d}` }));\n}\n\nconst STEP_DOWN = { hard: 'moderate', moderate: 'easy' };\n\n// Deterministic: the human picks, code applies. \"Lighter\" = one intensity level\n// down; an easy session becomes rest.\nfunction applyDecision(decision, proposal) {\n  if (decision == null) return { decision: 'no_response', session: null, origin: null };\n  if (!DECISIONS.includes(decision)) throw new Error(`Unknown decision: ${decision}`);\n  if (decision === 'approve') return { decision, session: proposal, origin: null };\n  if (decision === 'rest' || proposal.sport === 'rest' || !STEP_DOWN[proposal.intensity]) {\n    return { decision, session: { ...REST }, origin: 'human_rest' };\n  }\n  return {\n    decision,\n    session: { ...proposal, intensity: STEP_DOWN[proposal.intensity], focus: `${proposal.focus} (lighter)` },\n    origin: 'human_lighter',\n  };\n}\n\n\n// --- n8n wrapper: resumed by a button (query.decision) or by the timeout (no query)\nconst s = $('Proposal ready').first().json;\nconst req = $('Build approval message').first().json;\nconst sent = $('Ask for approval').first().json;\nconst query = $input.first().json.query;\nconst result = applyDecision(query ? query.decision : null, s.final.proposal);\nconst labels = { approve: '\u2705 Approved', lighter: '\ud83e\udeb6 Lighter', rest: '\ud83d\ude34 Rest', no_response: '\u231b No answer' };\nconst outcome = result.session\n  ? `${labels[result.decision]} \u2192 <b>${result.session.sport === 'rest' ? 'Rest' : `${result.session.sport} \u00b7 ${result.session.duration_min} min \u00b7 ${result.session.intensity} \u00b7 ${result.session.location}`}</b>`\n  : `${labels.no_response} within ${req.timeout_min} min: nothing scheduled`;\nreturn [{ json: {\n  run_id: req.run_id, target_date: s.run.target_date, requested_at: req.requested_at,\n  decision: result.decision, session: result.session, origin: result.origin || s.final.origin,\n  telegram_message_id: (sent.result || sent).message_id, chat_id: req.chat_id,\n  resumed_by_button: !!query,\n  confirmation: `${req.text}\\n\\n<b>Decision:</b> ${outcome}`,\n} }];\n"
+      }
+    },
+    {
+      "id": "3e9d8841-d7f8-56e9-bbc2-45a4c7d7250b",
+      "name": "Log decision",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        6240,
+        80
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH p AS (SELECT $1::jsonb AS j),\nd AS (\n  INSERT INTO human_decisions (run_id, channel, requested_at, decided_at, decision, telegram_message_id)\n  SELECT (j->>'run_id')::uuid, 'telegram', (j->>'requested_at')::timestamptz,\n         CASE WHEN j->>'decision' = 'no_response' THEN NULL ELSE now() END,\n         j->>'decision', (j->>'telegram_message_id')::bigint\n  FROM p\n  RETURNING run_id\n),\ns AS (\n  INSERT INTO planned_sessions (run_id, session_date, sport, duration_min, intensity, location, focus, origin)\n  SELECT (j->>'run_id')::uuid, (j->>'target_date')::date, j#>>'{session,sport}',\n         (j#>>'{session,duration_min}')::smallint, j#>>'{session,intensity}', j#>>'{session,location}',\n         j#>>'{session,focus}', j->>'origin'\n  FROM p WHERE jsonb_typeof(j->'session') = 'object'\n  RETURNING run_id\n),\nr AS (\n  UPDATE agent_runs SET status = 'completed', finished_at = now()\n  WHERE run_id = (SELECT (j->>'run_id')::uuid FROM p)\n  RETURNING run_id\n)\nSELECT (SELECT count(*) FROM d) AS decisions, (SELECT count(*) FROM s) AS sessions,\n       (SELECT count(*) FROM r) AS runs_closed;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pgCopilotWriter1",
+          "name": "Postgres copilot_writer"
+        }
+      },
+      "notes": "Decision is insert-only"
+    },
+    {
+      "id": "7e3115c8-9897-5e3e-914f-b22a6e31045f",
+      "name": "Answered by button?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        6440,
+        80
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "btn",
+              "leftValue": "={{ $('Apply decision').first().json.resumed_by_button }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "3548366b-3b50-578f-9fa8-6ee34d2bfe21",
+      "name": "Show confirmation page",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        6660,
+        -20
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "=<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><body style='font-family:system-ui;padding:2rem'><h2>{{ $('Apply decision').first().json.decision === 'approve' ? '\u2705 Approved' : $('Apply decision').first().json.decision === 'lighter' ? '\ud83e\udeb6 Lighter session' : '\ud83d\ude34 Rest day' }}</h2><p>Recorded. You can close this tab.</p>",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "content-type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "420053f7-9a17-59be-b31b-2e09b4acd0d1",
+      "name": "Update Telegram message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        6880,
+        80
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "editMessageText",
+        "messageType": "message",
+        "chatId": "={{ $('Apply decision').first().json.chat_id }}",
+        "messageId": "={{ $('Apply decision').first().json.telegram_message_id }}",
+        "text": "={{ $('Apply decision').first().json.confirmation }}",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "telegramBot00001",
+          "name": "Telegram bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notes": "Shows the decision and removes the buttons"
     }
   ],
   "connections": {
@@ -970,6 +1256,134 @@
         [
           {
             "node": "Proposal ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Proposal ready": {
+      "main": [
+        [
+          {
+            "node": "Log proposal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log proposal": {
+      "main": [
+        [
+          {
+            "node": "Read settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read settings": {
+      "main": [
+        [
+          {
+            "node": "Parse settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse settings": {
+      "main": [
+        [
+          {
+            "node": "Build approval message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build approval message": {
+      "main": [
+        [
+          {
+            "node": "Ask for approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask for approval": {
+      "main": [
+        [
+          {
+            "node": "Wait for decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for decision": {
+      "main": [
+        [
+          {
+            "node": "Apply decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply decision": {
+      "main": [
+        [
+          {
+            "node": "Log decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log decision": {
+      "main": [
+        [
+          {
+            "node": "Answered by button?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answered by button?": {
+      "main": [
+        [
+          {
+            "node": "Show confirmation page",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Telegram message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show confirmation page": {
+      "main": [
+        [
+          {
+            "node": "Update Telegram message",
             "type": "main",
             "index": 0
           }
