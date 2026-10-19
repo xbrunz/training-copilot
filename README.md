@@ -2,8 +2,6 @@
 
 An n8n workflow that plans my next-day triathlon session (IRONMAN 70.3 Cascais 2027) from recovery, training load, weather and my weekly plan. An LLM agent proposes the session, deterministic guardrails check it, and nothing is scheduled until I approve it in Telegram. Every run is logged in Postgres with its inputs, verdicts, human decision, latency, tokens and cost.
 
-It's a small, real system built to the standards I'd use for an HR operations agent: the data is personal health data, so it gets the same treatment as employee data.
-
 ![Workflow canvas](docs/canvas.png)
 
 ## What it demonstrates
