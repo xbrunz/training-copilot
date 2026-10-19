@@ -91,6 +91,10 @@
             {
               "name": "scenario_id",
               "type": "string"
+            },
+            {
+              "name": "guardrails_file",
+              "type": "string"
             }
           ]
         }
@@ -106,7 +110,7 @@
         80
       ],
       "parameters": {
-        "jsCode": "// Normalise the three entry points into one run config\nconst input = $input.first().json;\nconst scenarioId = input.scenario_id ? String(input.scenario_id) : null;\n// Guardrail on input: scenario IDs become file paths, so allow a strict pattern only\nif (scenarioId && !/^s[0-9]{2}_[a-z0-9_]{1,40}$/.test(scenarioId)) {\n  throw new Error(`Invalid scenario_id: ${scenarioId}`);\n}\nconst lisbon = $now.setZone('Europe/Lisbon');\nreturn [{ json: {\n  workflow_version: 'v0.2-collect',\n  n8n_execution_id: $execution.id,\n  run_started_at: new Date().toISOString(),\n  trigger: $('Every day 21:00').isExecuted ? 'schedule' : 'manual',\n  mode: scenarioId ? 'scenario' : 'live',\n  scenario_id: scenarioId,\n  today: lisbon.toISODate(),\n  target_date: lisbon.plus({ days: 1 }).toISODate(),\n} }];\n"
+        "jsCode": "// Normalise the three entry points into one run config\nconst input = $input.first().json;\nconst scenarioId = input.scenario_id ? String(input.scenario_id) : null;\n// Guardrail on input: scenario IDs become file paths, so allow a strict pattern only\nif (scenarioId && !/^s[0-9]{2}_[a-z0-9_]{1,40}$/.test(scenarioId)) {\n  throw new Error(`Invalid scenario_id: ${scenarioId}`);\n}\n// Only two config files exist; anything else is refused\nconst guardrailsFile = input.guardrails_file || 'guardrails.json';\nif (!['guardrails.json', 'guardrails.test.json'].includes(guardrailsFile)) {\n  throw new Error(`Invalid guardrails_file: ${guardrailsFile}`);\n}\nconst lisbon = $now.setZone('Europe/Lisbon');\nreturn [{ json: {\n  workflow_version: 'v0.3-maker-checker',\n  n8n_execution_id: $execution.id,\n  run_started_at: new Date().toISOString(),\n  trigger: $('Every day 21:00').isExecuted ? 'schedule' : 'manual',\n  mode: scenarioId ? 'scenario' : 'live',\n  scenario_id: scenarioId,\n  guardrails_file: guardrailsFile,\n  today: lisbon.toISODate(),\n  target_date: lisbon.plus({ days: 1 }).toISODate(),\n} }];\n"
       }
     },
     {
@@ -370,9 +374,269 @@
         80
       ],
       "parameters": {
-        "jsCode": "// Builds the \"daily context\": the only data the maker agent ever sees.\n// Pure function, so live API data and sample scenarios go through the same code.\n// Data minimisation: numbers and categories only. No names, activity titles,\n// GPS, device IDs or timestamps beyond the date.\n\nfunction buildContext({ targetDate, source, scenarioId, wellness, activities, weather, plan }) {\n  const addDays = (iso, n) => {\n    const d = new Date(iso + 'T12:00:00Z');\n    d.setUTCDate(d.getUTCDate() + n);\n    return d.toISOString().slice(0, 10);\n  };\n  const isNum = (v) => typeof v === 'number' && Number.isFinite(v) && v !== 0;\n  const round = (v, dp = 1) => (v == null ? null : Math.round(v * 10 ** dp) / 10 ** dp);\n  const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);\n\n  // \"today\" is the day the workflow runs (the evening before targetDate)\n  const today = addDays(targetDate, -1);\n  const byDate = Object.fromEntries((wellness || []).map((r) => [r.id, r]));\n  const todayRow = byDate[today] || {};\n  const prior7 = [1, 2, 3, 4, 5, 6, 7].map((i) => byDate[addDays(today, -i)]).filter(Boolean);\n\n  // --- Recovery: today vs own 7-day baseline (baseline excludes today)\n  const hrvBase = mean(prior7.map((r) => r.hrv).filter(isNum));\n  const rhrBase = mean(prior7.map((r) => r.restingHR).filter(isNum));\n  const hrv = isNum(todayRow.hrv) ? todayRow.hrv : null;\n  const rhr = isNum(todayRow.restingHR) ? todayRow.restingHR : null;\n  const recovery = {\n    hrv_ms: hrv,\n    hrv_baseline_7d_ms: round(hrvBase),\n    hrv_vs_baseline_pct: hrv && hrvBase ? round((hrv / hrvBase - 1) * 100) : null,\n    resting_hr_bpm: rhr,\n    resting_hr_baseline_7d_bpm: round(rhrBase),\n    resting_hr_vs_baseline_bpm: rhr && rhrBase ? round(rhr - rhrBase) : null,\n    sleep_hours: isNum(todayRow.sleepSecs) ? round(todayRow.sleepSecs / 3600) : null,\n    sleep_score: isNum(todayRow.sleepScore) ? todayRow.sleepScore : null,\n  };\n\n  // --- Load: fitness/fatigue from the latest row that has them, plus 7d vs previous 7d\n  const latestLoadRow = [todayRow, ...prior7].find((r) => isNum(r.ctl) && isNum(r.atl)) || {};\n  const acts = (activities || []).map((a) => ({\n    date: String(a.start_date_local || '').slice(0, 10),\n    sport: a.type,\n    load: Number(a.icu_training_load) || 0,\n  }));\n  const inWindow = (a, fromBack, toBack) => a.date >= addDays(today, -toBack) && a.date <= addDays(today, -fromBack);\n  const last7 = acts.filter((a) => inWindow(a, 0, 6));\n  const prev7 = acts.filter((a) => inWindow(a, 7, 13));\n  const sum = (xs) => xs.reduce((s, a) => s + a.load, 0);\n  const activeDays = new Set(last7.map((a) => a.date));\n  let daysSinceRest = 0;\n  while (daysSinceRest < 14 && acts.some((a) => a.date === addDays(today, -daysSinceRest))) daysSinceRest++;\n  const load7 = sum(last7);\n  const loadPrev7 = sum(prev7);\n  const load = {\n    ctl: round(latestLoadRow.ctl),\n    atl: round(latestLoadRow.atl),\n    tsb: latestLoadRow.ctl != null ? round(latestLoadRow.ctl - latestLoadRow.atl) : null,\n    load_7d: round(load7, 0),\n    load_prev_7d: round(loadPrev7, 0),\n    load_change_pct: loadPrev7 > 0 ? round((load7 / loadPrev7 - 1) * 100) : null,\n    sessions_7d: last7.length,\n    rest_days_7d: 7 - activeDays.size,\n    days_since_rest: daysSinceRest,\n    trained_today: activeDays.has(today),\n  };\n\n  // --- Weather for the target date (Open-Meteo daily block)\n  const d = (weather && weather.daily) || {};\n  const idx = (d.time || []).indexOf(targetDate);\n  const pick = (k) => (idx >= 0 && d[k] ? d[k][idx] : null);\n  const weatherOut = {\n    temp_min_c: pick('temperature_2m_min'),\n    temp_max_c: pick('temperature_2m_max'),\n    precip_mm: pick('precipitation_sum'),\n    precip_probability_pct: pick('precipitation_probability_max'),\n    wind_max_kmh: pick('wind_speed_10m_max'),\n    gust_max_kmh: pick('wind_gusts_10m_max'),\n  };\n\n  // --- Plan for the target weekday\n  const weekday = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][new Date(targetDate + 'T12:00:00Z').getUTCDay()];\n  const planned = (plan && plan.week && plan.week[weekday]) || null;\n\n  // --- Data quality: lets the guardrails act conservatively when data is missing\n  const missingToday = Object.entries({ hrv, resting_hr: rhr, sleep_hours: recovery.sleep_hours })\n    .filter(([, v]) => v == null)\n    .map(([k]) => k);\n  const dataQuality = {\n    wellness_days_7d: [0, 1, 2, 3, 4, 5, 6].filter((i) => isNum((byDate[addDays(today, -i)] || {}).hrv)).length,\n    missing_today: missingToday,\n    activities_14d: acts.length, // 0 means \"no data\", not \"fully rested\"\n    weather_available: idx >= 0,\n    plan_available: planned != null,\n  };\n\n  return {\n    target_date: targetDate,\n    weekday,\n    data_source: source,\n    scenario_id: scenarioId || null,\n    goal: plan ? plan.goal : null,\n    phase: plan ? plan.phase : null,\n    planned,\n    recovery,\n    load,\n    weather: weatherOut,\n    data_quality: dataQuality,\n  };\n}\n\n\n// --- n8n wrapper\nconst raw = $('Shape live data').isExecuted\n  ? $('Shape live data').first().json\n  : $('Shape scenario data').first().json;\nconst plan = $input.first().json.data;\nconst context = buildContext({\n  targetDate: raw.target_date, source: raw.mode, scenarioId: raw.scenario_id,\n  wellness: raw.wellness, activities: raw.activities, weather: raw.weather, plan,\n});\nconst run = {\n  workflow_version: raw.workflow_version, n8n_execution_id: raw.n8n_execution_id,\n  run_started_at: raw.run_started_at, trigger: raw.trigger, data_source: raw.mode,\n  scenario_id: raw.scenario_id, target_date: raw.target_date,\n};\nreturn [{ json: { run, context } }];\n"
+        "jsCode": "// Builds the \"daily context\": the only data the maker agent ever sees.\n// Pure function, so live API data and sample scenarios go through the same code.\n// Data minimisation: numbers and categories only. No names, activity titles,\n// GPS, device IDs or timestamps beyond the date.\n\nfunction buildContext({ targetDate, source, scenarioId, wellness, activities, weather, plan }) {\n  const addDays = (iso, n) => {\n    const d = new Date(iso + 'T12:00:00Z');\n    d.setUTCDate(d.getUTCDate() + n);\n    return d.toISOString().slice(0, 10);\n  };\n  const isNum = (v) => typeof v === 'number' && Number.isFinite(v) && v !== 0;\n  const round = (v, dp = 1) => (v == null ? null : Math.round(v * 10 ** dp) / 10 ** dp);\n  const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);\n\n  // \"today\" is the day the workflow runs (the evening before targetDate)\n  const today = addDays(targetDate, -1);\n  const byDate = Object.fromEntries((wellness || []).map((r) => [r.id, r]));\n  const todayRow = byDate[today] || {};\n  const prior7 = [1, 2, 3, 4, 5, 6, 7].map((i) => byDate[addDays(today, -i)]).filter(Boolean);\n\n  // --- Recovery: today vs own 7-day baseline (baseline excludes today)\n  const hrvBase = mean(prior7.map((r) => r.hrv).filter(isNum));\n  const rhrBase = mean(prior7.map((r) => r.restingHR).filter(isNum));\n  const hrv = isNum(todayRow.hrv) ? todayRow.hrv : null;\n  const rhr = isNum(todayRow.restingHR) ? todayRow.restingHR : null;\n  const recovery = {\n    hrv_ms: hrv,\n    hrv_baseline_7d_ms: round(hrvBase),\n    hrv_vs_baseline_pct: hrv && hrvBase ? round((hrv / hrvBase - 1) * 100) : null,\n    resting_hr_bpm: rhr,\n    resting_hr_baseline_7d_bpm: round(rhrBase),\n    resting_hr_vs_baseline_bpm: rhr && rhrBase ? round(rhr - rhrBase) : null,\n    sleep_hours: isNum(todayRow.sleepSecs) ? round(todayRow.sleepSecs / 3600) : null,\n    sleep_score: isNum(todayRow.sleepScore) ? todayRow.sleepScore : null,\n  };\n\n  // --- Load: fitness/fatigue from the latest row that has them, plus 7d vs previous 7d\n  const latestLoadRow = [todayRow, ...prior7].find((r) => isNum(r.ctl) && isNum(r.atl)) || {};\n  const acts = (activities || []).map((a) => ({\n    date: String(a.start_date_local || '').slice(0, 10),\n    sport: a.type,\n    load: Number(a.icu_training_load) || 0,\n  }));\n  const inWindow = (a, fromBack, toBack) => a.date >= addDays(today, -toBack) && a.date <= addDays(today, -fromBack);\n  const last7 = acts.filter((a) => inWindow(a, 0, 6));\n  const prev7 = acts.filter((a) => inWindow(a, 7, 13));\n  const sum = (xs) => xs.reduce((s, a) => s + a.load, 0);\n  const activeDays = new Set(last7.map((a) => a.date));\n  let daysSinceRest = 0;\n  while (daysSinceRest < 14 && acts.some((a) => a.date === addDays(today, -daysSinceRest))) daysSinceRest++;\n  const load7 = sum(last7);\n  const loadPrev7 = sum(prev7);\n  const load = {\n    ctl: round(latestLoadRow.ctl),\n    atl: round(latestLoadRow.atl),\n    tsb: latestLoadRow.ctl != null ? round(latestLoadRow.ctl - latestLoadRow.atl) : null,\n    load_7d: round(load7, 0),\n    load_prev_7d: round(loadPrev7, 0),\n    load_change_pct: loadPrev7 > 0 ? round((load7 / loadPrev7 - 1) * 100) : null,\n    sessions_7d: last7.length,\n    rest_days_7d: 7 - activeDays.size,\n    days_since_rest: daysSinceRest,\n    trained_today: activeDays.has(today),\n  };\n\n  // --- Weather for the target date (Open-Meteo daily block)\n  const d = (weather && weather.daily) || {};\n  const idx = (d.time || []).indexOf(targetDate);\n  const pick = (k) => (idx >= 0 && d[k] ? d[k][idx] : null);\n  const weatherOut = {\n    temp_min_c: pick('temperature_2m_min'),\n    temp_max_c: pick('temperature_2m_max'),\n    precip_mm: pick('precipitation_sum'),\n    precip_probability_pct: pick('precipitation_probability_max'),\n    wind_max_kmh: pick('wind_speed_10m_max'),\n    gust_max_kmh: pick('wind_gusts_10m_max'),\n  };\n\n  // --- Plan for the target weekday\n  const weekday = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][new Date(targetDate + 'T12:00:00Z').getUTCDay()];\n  const planned = (plan && plan.week && plan.week[weekday]) || null;\n\n  // --- Data quality: lets the guardrails act conservatively when data is missing\n  const missingToday = Object.entries({ hrv, resting_hr: rhr, sleep_hours: recovery.sleep_hours })\n    .filter(([, v]) => v == null)\n    .map(([k]) => k);\n  const dataQuality = {\n    wellness_days_7d: [0, 1, 2, 3, 4, 5, 6].filter((i) => isNum((byDate[addDays(today, -i)] || {}).hrv)).length,\n    missing_today: missingToday,\n    activities_14d: acts.length, // 0 means \"no data\", not \"fully rested\"\n    weather_available: idx >= 0,\n    plan_available: planned != null,\n  };\n\n  return {\n    target_date: targetDate,\n    weekday,\n    data_source: source,\n    scenario_id: scenarioId || null,\n    goal: plan ? plan.goal : null,\n    phase: plan ? plan.phase : null,\n    planned,\n    recovery,\n    load,\n    weather: weatherOut,\n    data_quality: dataQuality,\n  };\n}\n\n\n// --- n8n wrapper\nconst raw = $('Shape live data').isExecuted\n  ? $('Shape live data').first().json\n  : $('Shape scenario data').first().json;\nconst plan = $input.first().json.data;\nconst context = buildContext({\n  targetDate: raw.target_date, source: raw.mode, scenarioId: raw.scenario_id,\n  wellness: raw.wellness, activities: raw.activities, weather: raw.weather, plan,\n});\nconst run = {\n  workflow_version: raw.workflow_version, n8n_execution_id: raw.n8n_execution_id,\n  run_started_at: raw.run_started_at, trigger: raw.trigger, data_source: raw.mode,\n  scenario_id: raw.scenario_id, target_date: raw.target_date, guardrails_file: raw.guardrails_file,\n};\nreturn [{ json: { run, context } }];\n"
       },
       "notes": "Data minimisation: only numbers and categories go to the agent"
+    },
+    {
+      "id": "6b693b47-06bf-5c56-b6cf-18a4134633b6",
+      "name": "Note: ## 2 \u00b7 Maker / checker",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        -260
+      ],
+      "parameters": {
+        "content": "## 2 \u00b7 Maker / checker\nClaude Haiku proposes (strict JSON schema). Deterministic rules check. Rejected: retry with the reasons (max from config). Still rejected or API down: safe fallback.",
+        "width": 2380,
+        "height": 760,
+        "color": 4
+      }
+    },
+    {
+      "id": "d3db49fc-e63c-55ce-84d5-b66e2ae9691f",
+      "name": "Read guardrails",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        2460,
+        80
+      ],
+      "parameters": {
+        "operation": "read",
+        "fileSelector": "=/config/{{ $('Run config').first().json.guardrails_file }}",
+        "options": {}
+      },
+      "notes": "Thresholds set by the athlete; versioned"
+    },
+    {
+      "id": "99be5ee4-d4d3-5259-9dc5-6f02c62dc288",
+      "name": "Parse guardrails",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        2660,
+        80
+      ],
+      "parameters": {
+        "operation": "fromJson",
+        "options": {}
+      }
+    },
+    {
+      "id": "33b19c03-ed34-514a-90fb-99bad818dda2",
+      "name": "Start maker loop",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2860,
+        80
+      ],
+      "parameters": {
+        "jsCode": "// Loop state travels in the item: run, context, guardrails, and every attempt so far\nconst g = $input.first().json.data;\nconst { run, context } = $('Build daily context').first().json;\nreturn [{ json: { run, context, guardrails: g, rules_version: g.version, attempts: [] } }];\n"
+      }
+    },
+    {
+      "id": "53f8cbb1-ee08-510f-89e3-4870412db219",
+      "name": "Prepare maker request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3060,
+        80
+      ],
+      "parameters": {
+        "jsCode": "// Maker: builds the Claude request and parses the reply.\n// The maker knows the guardrail *policy* in plain words but not the thresholds;\n// the checker enforces the numbers. Each attempt is a fresh single-turn request\n// (previous rejections are quoted in the prompt), so nothing depends on replaying\n// earlier model output.\n\nconst MAKER_MODEL = 'claude-haiku-5-5';\n\nconst SYSTEM_PROMPT = `You plan tomorrow's single training session for an amateur triathlete preparing for an IRONMAN 70.3.\n\nYou receive a JSON \"daily context\": the planned session for tomorrow, recovery signals compared with the athlete's own 7-day baseline, recent training load, tomorrow's weather in Lisbon, and data-quality flags.\n\nHow to decide:\n- Start from the planned session. Keep it unless the data gives a reason to change it.\n- When recovery signals are worse than baseline (lower HRV, higher resting heart rate, short sleep), fatigue is high, load has ramped up quickly, or many days have passed without rest, reduce intensity first, then duration, and choose rest when several signals agree.\n- When data is missing, be more conservative, not less.\n- Bad weather for an outdoor ride: move it to the indoor trainer rather than skipping it.\n- Never make a session longer or harder than planned.\n- A rest day has duration 0, intensity \"easy\" and location \"none\".\n\nWrite \"focus\" as a short workout description (for example \"6 x 3 min at threshold, 2 min easy\"). Write \"rationale\" in at most two sentences, naming the signals that drove the decision. Set \"changed_from_plan\" to true if sport, duration, intensity or location differs from the plan.\n\nYour proposal is checked by deterministic safety rules before a human approves it. If a previous proposal was rejected, the reasons are listed: fix them without changing anything else.`;\n\nconst PROPOSAL_SCHEMA = {\n  type: 'object',\n  additionalProperties: false,\n  required: ['sport', 'duration_min', 'intensity', 'location', 'focus', 'changed_from_plan', 'rationale'],\n  properties: {\n    sport: { type: 'string', enum: ['swim', 'bike', 'run', 'strength', 'rest'] },\n    duration_min: { type: 'integer' },\n    intensity: { type: 'string', enum: ['easy', 'moderate', 'hard'] },\n    location: { type: 'string', enum: ['pool', 'open_water', 'outdoor', 'trainer', 'garage', 'none'] },\n    focus: { type: 'string' },\n    changed_from_plan: { type: 'boolean' },\n    rationale: { type: 'string' },\n  },\n};\n\nfunction buildMakerRequest(context, attempts) {\n  let user = `Daily context:\\n${JSON.stringify(context, null, 1)}`;\n  const rejected = attempts.filter((a) => a.verdict && !a.verdict.passed);\n  if (rejected.length) {\n    user += '\\n\\nPrevious proposals were rejected by the safety checker:';\n    for (const a of rejected) {\n      user += `\\n- Attempt ${a.attempt}: ${JSON.stringify(a.proposal)}\\n  Reasons: ${a.verdict.violations.map((v) => v.message).join('; ')}`;\n    }\n    user += '\\nPropose a corrected session.';\n  }\n  return {\n    model: MAKER_MODEL,\n    max_tokens: 4000,\n    output_config: { effort: 'low', format: { type: 'json_schema', schema: PROPOSAL_SCHEMA } },\n    system: SYSTEM_PROMPT,\n    messages: [{ role: 'user', content: user }],\n  };\n}\n\n// Never throws: an unusable reply becomes proposal=null with a reason,\n// which the checker rejects as S0_parse and the loop treats like any rejection.\nfunction parseMakerResponse(resp) {\n  const usage = (resp && resp.usage) || {};\n  const out = {\n    proposal: null,\n    stop_reason: resp ? resp.stop_reason : null,\n    input_tokens: usage.input_tokens != null ? usage.input_tokens : null,\n    output_tokens: usage.output_tokens != null ? usage.output_tokens : null,\n    model: resp && resp.model ? resp.model : MAKER_MODEL,\n    error: null,\n  };\n  if (!resp || !Array.isArray(resp.content)) {\n    out.error = 'No message in response';\n    return out;\n  }\n  if (resp.stop_reason === 'refusal') {\n    out.error = `Refused (${(resp.stop_details && resp.stop_details.category) || 'no category'})`;\n    return out;\n  }\n  if (resp.stop_reason === 'max_tokens') {\n    out.error = 'Hit max_tokens before finishing';\n    return out;\n  }\n  const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('');\n  try {\n    out.proposal = JSON.parse(text);\n  } catch (e) {\n    out.error = 'Reply was not valid JSON';\n  }\n  return out;\n}\n\n\n// --- n8n wrapper: one request per attempt; earlier rejections are quoted in the prompt\nconst s = $input.first().json;\nconst attempt = s.attempts.length + 1;\nreturn [{ json: {\n  ...s,\n  attempt,\n  call_started_at: new Date().toISOString(),\n  call_started_ms: Date.now(),\n  request_body: buildMakerRequest(s.context, s.attempts),\n} }];\n"
+      }
+    },
+    {
+      "id": "69e5fca2-bec6-5183-ad59-d4065a13d960",
+      "name": "Maker \u00b7 Claude Haiku",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3260,
+        80
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request_body) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "anthropicApiKey1",
+          "name": "Anthropic API key"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "notes": "Retries 429/5xx/timeouts 3x; then error output -> fallback"
+    },
+    {
+      "id": "de72c01a-f4eb-50d2-947b-910288595ded",
+      "name": "Parse proposal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3480,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Maker: builds the Claude request and parses the reply.\n// The maker knows the guardrail *policy* in plain words but not the thresholds;\n// the checker enforces the numbers. Each attempt is a fresh single-turn request\n// (previous rejections are quoted in the prompt), so nothing depends on replaying\n// earlier model output.\n\nconst MAKER_MODEL = 'claude-haiku-5-5';\n\nconst SYSTEM_PROMPT = `You plan tomorrow's single training session for an amateur triathlete preparing for an IRONMAN 70.3.\n\nYou receive a JSON \"daily context\": the planned session for tomorrow, recovery signals compared with the athlete's own 7-day baseline, recent training load, tomorrow's weather in Lisbon, and data-quality flags.\n\nHow to decide:\n- Start from the planned session. Keep it unless the data gives a reason to change it.\n- When recovery signals are worse than baseline (lower HRV, higher resting heart rate, short sleep), fatigue is high, load has ramped up quickly, or many days have passed without rest, reduce intensity first, then duration, and choose rest when several signals agree.\n- When data is missing, be more conservative, not less.\n- Bad weather for an outdoor ride: move it to the indoor trainer rather than skipping it.\n- Never make a session longer or harder than planned.\n- A rest day has duration 0, intensity \"easy\" and location \"none\".\n\nWrite \"focus\" as a short workout description (for example \"6 x 3 min at threshold, 2 min easy\"). Write \"rationale\" in at most two sentences, naming the signals that drove the decision. Set \"changed_from_plan\" to true if sport, duration, intensity or location differs from the plan.\n\nYour proposal is checked by deterministic safety rules before a human approves it. If a previous proposal was rejected, the reasons are listed: fix them without changing anything else.`;\n\nconst PROPOSAL_SCHEMA = {\n  type: 'object',\n  additionalProperties: false,\n  required: ['sport', 'duration_min', 'intensity', 'location', 'focus', 'changed_from_plan', 'rationale'],\n  properties: {\n    sport: { type: 'string', enum: ['swim', 'bike', 'run', 'strength', 'rest'] },\n    duration_min: { type: 'integer' },\n    intensity: { type: 'string', enum: ['easy', 'moderate', 'hard'] },\n    location: { type: 'string', enum: ['pool', 'open_water', 'outdoor', 'trainer', 'garage', 'none'] },\n    focus: { type: 'string' },\n    changed_from_plan: { type: 'boolean' },\n    rationale: { type: 'string' },\n  },\n};\n\nfunction buildMakerRequest(context, attempts) {\n  let user = `Daily context:\\n${JSON.stringify(context, null, 1)}`;\n  const rejected = attempts.filter((a) => a.verdict && !a.verdict.passed);\n  if (rejected.length) {\n    user += '\\n\\nPrevious proposals were rejected by the safety checker:';\n    for (const a of rejected) {\n      user += `\\n- Attempt ${a.attempt}: ${JSON.stringify(a.proposal)}\\n  Reasons: ${a.verdict.violations.map((v) => v.message).join('; ')}`;\n    }\n    user += '\\nPropose a corrected session.';\n  }\n  return {\n    model: MAKER_MODEL,\n    max_tokens: 4000,\n    output_config: { effort: 'low', format: { type: 'json_schema', schema: PROPOSAL_SCHEMA } },\n    system: SYSTEM_PROMPT,\n    messages: [{ role: 'user', content: user }],\n  };\n}\n\n// Never throws: an unusable reply becomes proposal=null with a reason,\n// which the checker rejects as S0_parse and the loop treats like any rejection.\nfunction parseMakerResponse(resp) {\n  const usage = (resp && resp.usage) || {};\n  const out = {\n    proposal: null,\n    stop_reason: resp ? resp.stop_reason : null,\n    input_tokens: usage.input_tokens != null ? usage.input_tokens : null,\n    output_tokens: usage.output_tokens != null ? usage.output_tokens : null,\n    model: resp && resp.model ? resp.model : MAKER_MODEL,\n    error: null,\n  };\n  if (!resp || !Array.isArray(resp.content)) {\n    out.error = 'No message in response';\n    return out;\n  }\n  if (resp.stop_reason === 'refusal') {\n    out.error = `Refused (${(resp.stop_details && resp.stop_details.category) || 'no category'})`;\n    return out;\n  }\n  if (resp.stop_reason === 'max_tokens') {\n    out.error = 'Hit max_tokens before finishing';\n    return out;\n  }\n  const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('');\n  try {\n    out.proposal = JSON.parse(text);\n  } catch (e) {\n    out.error = 'Reply was not valid JSON';\n  }\n  return out;\n}\n\n\n// --- n8n wrapper: recover loop state from the request node, record this call\nconst s = $('Prepare maker request').last().json;\nconst parsed = parseMakerResponse($input.first().json);\nconst call = {\n  attempt: s.attempt, model: parsed.model, started_at: s.call_started_at,\n  latency_ms: Date.now() - s.call_started_ms, stop_reason: parsed.stop_reason,\n  input_tokens: parsed.input_tokens, output_tokens: parsed.output_tokens, error: parsed.error,\n};\nconst { request_body, call_started_ms, call_started_at, ...state } = s;\nreturn [{ json: { ...state, proposal: parsed.proposal, call } }];\n"
+      }
+    },
+    {
+      "id": "392e98d9-cffa-5e0b-a34e-d1067f8c681d",
+      "name": "Checker \u00b7 guardrails",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3700,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Checker: deterministic guardrails over the maker's proposal.\n// No LLM involved. Every rule returns a reason, so each rejection is explainable\n// and feeds back into the maker's retry. Thresholds come from config/guardrails.json.\n\nconst INTENSITY_RANK = { easy: 0, moderate: 1, hard: 2 };\nconst LOCATIONS = {\n  swim: ['pool', 'open_water'],\n  bike: ['outdoor', 'trainer'],\n  run: ['outdoor', 'trainer'],\n  strength: ['garage'],\n  rest: ['none'],\n};\n\nfunction checkProposal(proposal, context, config) {\n  const violations = [];\n  const notConfigured = [];\n  const fail = (rule_id, message) => violations.push({ rule_id, message });\n  const rules = config.rules;\n  const value = (ruleId, key) => {\n    const v = rules[ruleId] ? rules[ruleId][key] : null;\n    if (v == null && !notConfigured.includes(ruleId)) notConfigured.push(ruleId);\n    return v;\n  };\n\n  // --- S: structural checks, always on\n  if (!proposal || typeof proposal !== 'object') {\n    return { passed: false, violations: [{ rule_id: 'S0_parse', message: 'No valid JSON proposal' }], not_configured: [] };\n  }\n  const p = proposal;\n  if (!LOCATIONS[p.sport]) fail('S1_vocabulary', `Unknown sport \"${p.sport}\"`);\n  if (!(p.intensity in INTENSITY_RANK)) fail('S1_vocabulary', `Unknown intensity \"${p.intensity}\"`);\n  if (!Number.isInteger(p.duration_min) || p.duration_min < 0) fail('S1_vocabulary', 'duration_min must be a non-negative integer');\n  if (violations.length) return { passed: false, violations, not_configured: [] };\n  if (!LOCATIONS[p.sport].includes(p.location)) fail('S2_location', `${p.sport} cannot be done at \"${p.location}\"`);\n  if (p.sport === 'rest' && (p.duration_min !== 0 || p.intensity !== 'easy')) fail('S3_rest_shape', 'Rest must have duration 0 and intensity easy');\n  if (p.sport !== 'rest' && p.duration_min === 0) fail('S3_rest_shape', 'A training session needs a duration above 0');\n\n  const isHard = p.intensity === 'hard';\n  const easyOrRest = p.sport === 'rest' || p.intensity === 'easy';\n  const r = context.recovery || {};\n  const l = context.load || {};\n  const w = context.weather || {};\n  const planned = context.planned || {};\n\n  // --- R: athlete-configured guardrails. A rule only fires when its signal is present.\n  const hrvDrop = value('R1_hrv_drop', 'hrv_below_baseline_pct');\n  if (hrvDrop != null && r.hrv_vs_baseline_pct != null && r.hrv_vs_baseline_pct < -hrvDrop && isHard)\n    fail('R1_hrv_drop', `HRV is ${-r.hrv_vs_baseline_pct}% below baseline (limit ${hrvDrop}%): no hard session`);\n\n  const minSleep = value('R2_short_sleep', 'min_sleep_hours');\n  if (minSleep != null && r.sleep_hours != null && r.sleep_hours < minSleep && isHard)\n    fail('R2_short_sleep', `Slept ${r.sleep_hours} h (minimum ${minSleep} h): no hard session`);\n\n  const rhrUp = value('R3_elevated_rhr', 'rhr_above_baseline_bpm');\n  if (rhrUp != null && r.resting_hr_vs_baseline_bpm != null && r.resting_hr_vs_baseline_bpm > rhrUp && !easyOrRest)\n    fail('R3_elevated_rhr', `Resting HR is +${r.resting_hr_vs_baseline_bpm} bpm (limit +${rhrUp}): easy or rest only`);\n\n  const minTsb = value('R4_fatigue', 'min_tsb');\n  if (minTsb != null && l.tsb != null && l.tsb < minTsb && !easyOrRest)\n    fail('R4_fatigue', `Form (TSB) is ${l.tsb} (minimum ${minTsb}): easy or rest only`);\n\n  const maxRamp = value('R5_load_ramp', 'max_load_increase_pct');\n  if (maxRamp != null && l.load_change_pct != null && l.load_change_pct > maxRamp && isHard)\n    fail('R5_load_ramp', `Load is up ${l.load_change_pct}% week on week (limit ${maxRamp}%): no hard session`);\n\n  const maxStreak = value('R6_rest_overdue', 'max_days_without_rest');\n  if (maxStreak != null && l.days_since_rest != null && l.days_since_rest >= maxStreak && !easyOrRest)\n    fail('R6_rest_overdue', `${l.days_since_rest} days without rest (limit ${maxStreak}): rest or easy only`);\n\n  const maxDur = value('R7_duration_cap', 'max_duration_vs_plan');\n  if (maxDur != null && planned.duration_min > 0 && p.duration_min > planned.duration_min * maxDur)\n    fail('R7_duration_cap', `${p.duration_min} min exceeds ${maxDur} x planned ${planned.duration_min} min`);\n\n  const maxRain = value('R8_weather', 'max_precip_mm');\n  const maxGust = value('R8_weather', 'max_gust_kmh');\n  const badWeather = (maxRain != null && w.precip_mm != null && w.precip_mm > maxRain)\n    || (maxGust != null && w.gust_max_kmh != null && w.gust_max_kmh > maxGust);\n  if (badWeather && p.sport === 'bike' && p.location === 'outdoor')\n    fail('R8_weather', `Forecast ${w.precip_mm} mm rain, gusts ${w.gust_max_kmh} km/h: no outdoor ride`);\n\n  const maxWhenMissing = value('R9_missing_data', 'max_intensity');\n  const missing = (context.data_quality && context.data_quality.missing_today) || [];\n  if (maxWhenMissing != null && missing.length && INTENSITY_RANK[p.intensity] > INTENSITY_RANK[maxWhenMissing])\n    fail('R9_missing_data', `Missing today: ${missing.join(', ')}. Intensity capped at ${maxWhenMissing}`);\n\n  const keepRest = value('R10_planned_rest', 'enforce');\n  if (keepRest === true && planned.sport === 'rest' && p.sport !== 'rest')\n    fail('R10_planned_rest', 'Planned rest day must stay rest');\n\n  return { passed: violations.length === 0, violations, not_configured: notConfigured };\n}\n\n// Safe fallback when the maker fails or exhausts its retries: never an LLM output.\n// Easy version of the planned session (indoors if it was an outdoor ride); rest if\n// that still breaks a rule. Rest passes every rule by construction.\nfunction safeFallback(context, config) {\n  const rest = { sport: 'rest', duration_min: 0, intensity: 'easy', location: 'none',\n    focus: 'Rest day', changed_from_plan: true, rationale: 'Safe fallback: rest.' };\n  const planned = context.planned;\n  if (!planned || planned.sport === 'rest') return { ...rest, changed_from_plan: false };\n  const easy = {\n    sport: planned.sport,\n    duration_min: planned.duration_min,\n    intensity: 'easy',\n    location: planned.sport === 'bike' ? 'trainer' : planned.location,\n    focus: `Easy ${planned.sport}`,\n    changed_from_plan: true,\n    rationale: 'Safe fallback: easy version of the planned session.',\n  };\n  return checkProposal(easy, context, config).passed ? easy : rest;\n}\n\n\n// --- n8n wrapper: deterministic verdict, appended to the attempt history\nconst s = $input.first().json;\nconst verdict = checkProposal(s.proposal, s.context, s.guardrails);\nconst attempts = [...s.attempts, { attempt: s.attempt, proposal: s.proposal, verdict, call: s.call }];\nconst maxAttempts = 1 + Math.min(Number(s.guardrails.max_maker_retries) || 0, 4); // hard cap\nreturn [{ json: { ...s, attempts, verdict, retry_allowed: !verdict.passed && attempts.length < maxAttempts } }];\n"
+      },
+      "notes": "Deterministic. No LLM."
+    },
+    {
+      "id": "dcf66016-e51b-525e-afe5-88b09ab493cc",
+      "name": "Passed checker?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3920,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ok",
+              "leftValue": "={{ $json.verdict.passed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "154f084f-8fce-5355-90fe-601d43f9c751",
+      "name": "Retry allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4140,
+        160
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "retry",
+              "leftValue": "={{ $json.retry_allowed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "3527e727-3689-5e7a-b7d9-cdd6111e01bb",
+      "name": "Maker call failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3480,
+        260
+      ],
+      "parameters": {
+        "jsCode": "// The API call failed after its HTTP retries: no point re-asking the model\nconst s = $('Prepare maker request').last().json;\nconst err = $input.first().json.error || {};\nconst call = { attempt: s.attempt, model: 'claude-haiku-5-5', started_at: s.call_started_at,\n  latency_ms: Date.now() - s.call_started_ms, stop_reason: null, input_tokens: null, output_tokens: null,\n  error: `HTTP error: ${err.message || JSON.stringify(err).slice(0, 200)}` };\nconst { request_body, call_started_ms, call_started_at, ...state } = s;\nconst verdict = { passed: false, violations: [{ rule_id: 'S0_api', message: call.error }], not_configured: [] };\nreturn [{ json: { ...state, attempts: [...s.attempts, { attempt: s.attempt, proposal: null, verdict, call }] } }];\n"
+      }
+    },
+    {
+      "id": "b19c7cb1-0800-5ef7-a751-b073adcec2d3",
+      "name": "Accept agent proposal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4360,
+        -60
+      ],
+      "parameters": {
+        "jsCode": "// Checker passed: the agent's proposal goes to the human\nconst s = $input.first().json;\nreturn [{ json: { run: s.run, context: s.context, rules_version: s.rules_version, attempts: s.attempts,\n  final: { origin: 'agent', proposal: s.proposal, verdict: s.verdict } } }];\n"
+      }
+    },
+    {
+      "id": "8bb94791-3ac3-588c-a8ee-dfd52ad900db",
+      "name": "Safe fallback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4360,
+        260
+      ],
+      "parameters": {
+        "jsCode": "// Checker: deterministic guardrails over the maker's proposal.\n// No LLM involved. Every rule returns a reason, so each rejection is explainable\n// and feeds back into the maker's retry. Thresholds come from config/guardrails.json.\n\nconst INTENSITY_RANK = { easy: 0, moderate: 1, hard: 2 };\nconst LOCATIONS = {\n  swim: ['pool', 'open_water'],\n  bike: ['outdoor', 'trainer'],\n  run: ['outdoor', 'trainer'],\n  strength: ['garage'],\n  rest: ['none'],\n};\n\nfunction checkProposal(proposal, context, config) {\n  const violations = [];\n  const notConfigured = [];\n  const fail = (rule_id, message) => violations.push({ rule_id, message });\n  const rules = config.rules;\n  const value = (ruleId, key) => {\n    const v = rules[ruleId] ? rules[ruleId][key] : null;\n    if (v == null && !notConfigured.includes(ruleId)) notConfigured.push(ruleId);\n    return v;\n  };\n\n  // --- S: structural checks, always on\n  if (!proposal || typeof proposal !== 'object') {\n    return { passed: false, violations: [{ rule_id: 'S0_parse', message: 'No valid JSON proposal' }], not_configured: [] };\n  }\n  const p = proposal;\n  if (!LOCATIONS[p.sport]) fail('S1_vocabulary', `Unknown sport \"${p.sport}\"`);\n  if (!(p.intensity in INTENSITY_RANK)) fail('S1_vocabulary', `Unknown intensity \"${p.intensity}\"`);\n  if (!Number.isInteger(p.duration_min) || p.duration_min < 0) fail('S1_vocabulary', 'duration_min must be a non-negative integer');\n  if (violations.length) return { passed: false, violations, not_configured: [] };\n  if (!LOCATIONS[p.sport].includes(p.location)) fail('S2_location', `${p.sport} cannot be done at \"${p.location}\"`);\n  if (p.sport === 'rest' && (p.duration_min !== 0 || p.intensity !== 'easy')) fail('S3_rest_shape', 'Rest must have duration 0 and intensity easy');\n  if (p.sport !== 'rest' && p.duration_min === 0) fail('S3_rest_shape', 'A training session needs a duration above 0');\n\n  const isHard = p.intensity === 'hard';\n  const easyOrRest = p.sport === 'rest' || p.intensity === 'easy';\n  const r = context.recovery || {};\n  const l = context.load || {};\n  const w = context.weather || {};\n  const planned = context.planned || {};\n\n  // --- R: athlete-configured guardrails. A rule only fires when its signal is present.\n  const hrvDrop = value('R1_hrv_drop', 'hrv_below_baseline_pct');\n  if (hrvDrop != null && r.hrv_vs_baseline_pct != null && r.hrv_vs_baseline_pct < -hrvDrop && isHard)\n    fail('R1_hrv_drop', `HRV is ${-r.hrv_vs_baseline_pct}% below baseline (limit ${hrvDrop}%): no hard session`);\n\n  const minSleep = value('R2_short_sleep', 'min_sleep_hours');\n  if (minSleep != null && r.sleep_hours != null && r.sleep_hours < minSleep && isHard)\n    fail('R2_short_sleep', `Slept ${r.sleep_hours} h (minimum ${minSleep} h): no hard session`);\n\n  const rhrUp = value('R3_elevated_rhr', 'rhr_above_baseline_bpm');\n  if (rhrUp != null && r.resting_hr_vs_baseline_bpm != null && r.resting_hr_vs_baseline_bpm > rhrUp && !easyOrRest)\n    fail('R3_elevated_rhr', `Resting HR is +${r.resting_hr_vs_baseline_bpm} bpm (limit +${rhrUp}): easy or rest only`);\n\n  const minTsb = value('R4_fatigue', 'min_tsb');\n  if (minTsb != null && l.tsb != null && l.tsb < minTsb && !easyOrRest)\n    fail('R4_fatigue', `Form (TSB) is ${l.tsb} (minimum ${minTsb}): easy or rest only`);\n\n  const maxRamp = value('R5_load_ramp', 'max_load_increase_pct');\n  if (maxRamp != null && l.load_change_pct != null && l.load_change_pct > maxRamp && isHard)\n    fail('R5_load_ramp', `Load is up ${l.load_change_pct}% week on week (limit ${maxRamp}%): no hard session`);\n\n  const maxStreak = value('R6_rest_overdue', 'max_days_without_rest');\n  if (maxStreak != null && l.days_since_rest != null && l.days_since_rest >= maxStreak && !easyOrRest)\n    fail('R6_rest_overdue', `${l.days_since_rest} days without rest (limit ${maxStreak}): rest or easy only`);\n\n  const maxDur = value('R7_duration_cap', 'max_duration_vs_plan');\n  if (maxDur != null && planned.duration_min > 0 && p.duration_min > planned.duration_min * maxDur)\n    fail('R7_duration_cap', `${p.duration_min} min exceeds ${maxDur} x planned ${planned.duration_min} min`);\n\n  const maxRain = value('R8_weather', 'max_precip_mm');\n  const maxGust = value('R8_weather', 'max_gust_kmh');\n  const badWeather = (maxRain != null && w.precip_mm != null && w.precip_mm > maxRain)\n    || (maxGust != null && w.gust_max_kmh != null && w.gust_max_kmh > maxGust);\n  if (badWeather && p.sport === 'bike' && p.location === 'outdoor')\n    fail('R8_weather', `Forecast ${w.precip_mm} mm rain, gusts ${w.gust_max_kmh} km/h: no outdoor ride`);\n\n  const maxWhenMissing = value('R9_missing_data', 'max_intensity');\n  const missing = (context.data_quality && context.data_quality.missing_today) || [];\n  if (maxWhenMissing != null && missing.length && INTENSITY_RANK[p.intensity] > INTENSITY_RANK[maxWhenMissing])\n    fail('R9_missing_data', `Missing today: ${missing.join(', ')}. Intensity capped at ${maxWhenMissing}`);\n\n  const keepRest = value('R10_planned_rest', 'enforce');\n  if (keepRest === true && planned.sport === 'rest' && p.sport !== 'rest')\n    fail('R10_planned_rest', 'Planned rest day must stay rest');\n\n  return { passed: violations.length === 0, violations, not_configured: notConfigured };\n}\n\n// Safe fallback when the maker fails or exhausts its retries: never an LLM output.\n// Easy version of the planned session (indoors if it was an outdoor ride); rest if\n// that still breaks a rule. Rest passes every rule by construction.\nfunction safeFallback(context, config) {\n  const rest = { sport: 'rest', duration_min: 0, intensity: 'easy', location: 'none',\n    focus: 'Rest day', changed_from_plan: true, rationale: 'Safe fallback: rest.' };\n  const planned = context.planned;\n  if (!planned || planned.sport === 'rest') return { ...rest, changed_from_plan: false };\n  const easy = {\n    sport: planned.sport,\n    duration_min: planned.duration_min,\n    intensity: 'easy',\n    location: planned.sport === 'bike' ? 'trainer' : planned.location,\n    focus: `Easy ${planned.sport}`,\n    changed_from_plan: true,\n    rationale: 'Safe fallback: easy version of the planned session.',\n  };\n  return checkProposal(easy, context, config).passed ? easy : rest;\n}\n\n\n// --- n8n wrapper: deterministic safe session, re-checked so the fallback is provably within the rules\nconst s = $input.first().json;\nconst proposal = safeFallback(s.context, s.guardrails);\nconst verdict = checkProposal(proposal, s.context, s.guardrails);\nreturn [{ json: { run: s.run, context: s.context, rules_version: s.rules_version, attempts: s.attempts,\n  final: { origin: 'fallback', proposal, verdict } } }];\n"
+      },
+      "notes": "Rule-based easy session or rest; never an LLM output"
+    },
+    {
+      "id": "ff69dce3-87f9-5e3e-8c5f-e09cd31f7e48",
+      "name": "Proposal ready",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        4600,
+        80
+      ],
+      "parameters": {}
     }
   ],
   "connections": {
@@ -542,6 +806,170 @@
         [
           {
             "node": "Build daily context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build daily context": {
+      "main": [
+        [
+          {
+            "node": "Read guardrails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read guardrails": {
+      "main": [
+        [
+          {
+            "node": "Parse guardrails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse guardrails": {
+      "main": [
+        [
+          {
+            "node": "Start maker loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start maker loop": {
+      "main": [
+        [
+          {
+            "node": "Prepare maker request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare maker request": {
+      "main": [
+        [
+          {
+            "node": "Maker \u00b7 Claude Haiku",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Maker \u00b7 Claude Haiku": {
+      "main": [
+        [
+          {
+            "node": "Parse proposal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Maker call failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse proposal": {
+      "main": [
+        [
+          {
+            "node": "Checker \u00b7 guardrails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Checker \u00b7 guardrails": {
+      "main": [
+        [
+          {
+            "node": "Passed checker?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Passed checker?": {
+      "main": [
+        [
+          {
+            "node": "Accept agent proposal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry allowed?": {
+      "main": [
+        [
+          {
+            "node": "Prepare maker request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Safe fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Maker call failed": {
+      "main": [
+        [
+          {
+            "node": "Safe fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Accept agent proposal": {
+      "main": [
+        [
+          {
+            "node": "Proposal ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Safe fallback": {
+      "main": [
+        [
+          {
+            "node": "Proposal ready",
             "type": "main",
             "index": 0
           }

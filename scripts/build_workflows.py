@@ -8,21 +8,24 @@ Usage: python3 scripts/build_workflows.py   then   ./scripts/n8n_import.sh
 """
 import json
 import pathlib
+import re
 import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CODE = ROOT / "workflows" / "code"
 MAIN_ID = "TrainCopilotMain"
 RUNNER_ID = "TrainCopilotTest"
-VERSION = "v0.2-collect"
+VERSION = "v0.3-maker-checker"
 
 CRED_INTERVALS = {"httpBasicAuth": {"id": "intervalsApiKey1", "name": "intervals.icu API key"}}
+CRED_ANTHROPIC = {"httpHeaderAuth": {"id": "anthropicApiKey1", "name": "Anthropic API key"}}
 RETRY = {"retryOnFail": True, "maxTries": 3, "waitBetweenTries": 2000}
 
 
-def js(name):
-    src = (CODE / name).read_text()
-    return src.replace("if (typeof module !== 'undefined') module.exports = { buildContext };\n", "")
+def js(*names):
+    """Concatenate module files for a Code node, dropping their Node-only export lines."""
+    src = "\n".join((CODE / n).read_text() for n in names)
+    return re.sub(r"^if \(typeof module !== 'undefined'\).*\n", "", src, flags=re.M)
 
 
 class Flow:
@@ -66,6 +69,11 @@ const scenarioId = input.scenario_id ? String(input.scenario_id) : null;
 if (scenarioId && !/^s[0-9]{{2}}_[a-z0-9_]{{1,40}}$/.test(scenarioId)) {{
   throw new Error(`Invalid scenario_id: ${{scenarioId}}`);
 }}
+// Only two config files exist; anything else is refused
+const guardrailsFile = input.guardrails_file || 'guardrails.json';
+if (!['guardrails.json', 'guardrails.test.json'].includes(guardrailsFile)) {{
+  throw new Error(`Invalid guardrails_file: ${{guardrailsFile}}`);
+}}
 const lisbon = $now.setZone('Europe/Lisbon');
 return [{{ json: {{
   workflow_version: '{VERSION}',
@@ -74,6 +82,7 @@ return [{{ json: {{
   trigger: $('Every day 21:00').isExecuted ? 'schedule' : 'manual',
   mode: scenarioId ? 'scenario' : 'live',
   scenario_id: scenarioId,
+  guardrails_file: guardrailsFile,
   today: lisbon.toISODate(),
   target_date: lisbon.plus({{ days: 1 }}).toISODate(),
 }} }}];
@@ -115,9 +124,77 @@ const context = buildContext({
 const run = {
   workflow_version: raw.workflow_version, n8n_execution_id: raw.n8n_execution_id,
   run_started_at: raw.run_started_at, trigger: raw.trigger, data_source: raw.mode,
-  scenario_id: raw.scenario_id, target_date: raw.target_date,
+  scenario_id: raw.scenario_id, target_date: raw.target_date, guardrails_file: raw.guardrails_file,
 };
 return [{ json: { run, context } }];
+"""
+
+
+START_LOOP = """// Loop state travels in the item: run, context, guardrails, and every attempt so far
+const g = $input.first().json.data;
+const { run, context } = $('Build daily context').first().json;
+return [{ json: { run, context, guardrails: g, rules_version: g.version, attempts: [] } }];
+"""
+
+PREPARE = """
+// --- n8n wrapper: one request per attempt; earlier rejections are quoted in the prompt
+const s = $input.first().json;
+const attempt = s.attempts.length + 1;
+return [{ json: {
+  ...s,
+  attempt,
+  call_started_at: new Date().toISOString(),
+  call_started_ms: Date.now(),
+  request_body: buildMakerRequest(s.context, s.attempts),
+} }];
+"""
+
+PARSE = """
+// --- n8n wrapper: recover loop state from the request node, record this call
+const s = $('Prepare maker request').last().json;
+const parsed = parseMakerResponse($input.first().json);
+const call = {
+  attempt: s.attempt, model: parsed.model, started_at: s.call_started_at,
+  latency_ms: Date.now() - s.call_started_ms, stop_reason: parsed.stop_reason,
+  input_tokens: parsed.input_tokens, output_tokens: parsed.output_tokens, error: parsed.error,
+};
+const { request_body, call_started_ms, call_started_at, ...state } = s;
+return [{ json: { ...state, proposal: parsed.proposal, call } }];
+"""
+
+CHECK = """
+// --- n8n wrapper: deterministic verdict, appended to the attempt history
+const s = $input.first().json;
+const verdict = checkProposal(s.proposal, s.context, s.guardrails);
+const attempts = [...s.attempts, { attempt: s.attempt, proposal: s.proposal, verdict, call: s.call }];
+const maxAttempts = 1 + Math.min(Number(s.guardrails.max_maker_retries) || 0, 4); // hard cap
+return [{ json: { ...s, attempts, verdict, retry_allowed: !verdict.passed && attempts.length < maxAttempts } }];
+"""
+
+MAKER_FAILED = """// The API call failed after its HTTP retries: no point re-asking the model
+const s = $('Prepare maker request').last().json;
+const err = $input.first().json.error || {};
+const call = { attempt: s.attempt, model: 'claude-haiku-5-5', started_at: s.call_started_at,
+  latency_ms: Date.now() - s.call_started_ms, stop_reason: null, input_tokens: null, output_tokens: null,
+  error: `HTTP error: ${err.message || JSON.stringify(err).slice(0, 200)}` };
+const { request_body, call_started_ms, call_started_at, ...state } = s;
+const verdict = { passed: false, violations: [{ rule_id: 'S0_api', message: call.error }], not_configured: [] };
+return [{ json: { ...state, attempts: [...s.attempts, { attempt: s.attempt, proposal: null, verdict, call }] } }];
+"""
+
+ACCEPT = """// Checker passed: the agent's proposal goes to the human
+const s = $input.first().json;
+return [{ json: { run: s.run, context: s.context, rules_version: s.rules_version, attempts: s.attempts,
+  final: { origin: 'agent', proposal: s.proposal, verdict: s.verdict } } }];
+"""
+
+FALLBACK = """
+// --- n8n wrapper: deterministic safe session, re-checked so the fallback is provably within the rules
+const s = $input.first().json;
+const proposal = safeFallback(s.context, s.guardrails);
+const verdict = checkProposal(proposal, s.context, s.guardrails);
+return [{ json: { run: s.run, context: s.context, rules_version: s.rules_version, attempts: s.attempts,
+  final: { origin: 'fallback', proposal, verdict } } }];
 """
 
 
@@ -135,7 +212,8 @@ def main_workflow():
                                          "value": "s01_good_recovery_intervals"}]},
         "options": {}}, notes="Empty scenario_id = live data")
     f.node("Called by test runner", "executeWorkflowTrigger", 1.1, (40, 260),
-           {"workflowInputs": {"values": [{"name": "scenario_id", "type": "string"}]}})
+           {"workflowInputs": {"values": [{"name": "scenario_id", "type": "string"},
+                                            {"name": "guardrails_file", "type": "string"}]}})
     f.node("Run config", "code", 2, (460, 80), code(RUN_CONFIG))
     f.node("Live data?", "if", 2.2, (660, 80), {
         "conditions": {"options": {"caseSensitive": True, "leftValue": "", "typeValidation": "strict", "version": 2},
@@ -188,27 +266,85 @@ def main_workflow():
     f.link("Shape scenario data", "Read weekly plan")
     f.link("Read weekly plan", "Parse weekly plan")
     f.link("Parse weekly plan", "Build daily context")
+
+    # --- 2 · Maker / checker loop
+    f.sticky("## 2 · Maker / checker\nClaude Haiku proposes (strict JSON schema). Deterministic rules check. "
+             "Rejected: retry with the reasons (max from config). Still rejected or API down: safe fallback.",
+             (2400, -260), (2380, 760), color=4)
+    f.node("Read guardrails", "readWriteFile", 1, (2460, 80),
+           {"operation": "read", "fileSelector": "=/config/{{ $('Run config').first().json.guardrails_file }}", "options": {}},
+           notes="Thresholds set by the athlete; versioned")
+    f.node("Parse guardrails", "extractFromFile", 1, (2660, 80), {"operation": "fromJson", "options": {}})
+    f.node("Start maker loop", "code", 2, (2860, 80), code(START_LOOP))
+    f.node("Prepare maker request", "code", 2, (3060, 80), code(js("maker.js") + PREPARE))
+    f.node("Maker · Claude Haiku", "httpRequest", 4.2, (3260, 80), {
+        "method": "POST", "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": True,
+        "headerParameters": {"parameters": [{"name": "anthropic-version", "value": "2023-06-01"}]},
+        "sendBody": True, "specifyBody": "json", "jsonBody": "={{ JSON.stringify($json.request_body) }}",
+        "options": {"timeout": 60000}},
+        credentials=CRED_ANTHROPIC, onError="continueErrorOutput",
+        retryOnFail=True, maxTries=3, waitBetweenTries=3000,
+        notes="Retries 429/5xx/timeouts 3x; then error output -> fallback")
+    f.node("Parse proposal", "code", 2, (3480, 0), code(js("maker.js") + PARSE))
+    f.node("Checker · guardrails", "code", 2, (3700, 0), code(js("checker.js") + CHECK),
+           notes="Deterministic. No LLM.")
+    f.node("Passed checker?", "if", 2.2, (3920, 0), {
+        "conditions": {"options": {"caseSensitive": True, "leftValue": "", "typeValidation": "strict", "version": 2},
+                       "conditions": [{"id": "ok", "leftValue": "={{ $json.verdict.passed }}", "rightValue": True,
+                                       "operator": {"type": "boolean", "operation": "true", "singleValue": True}}],
+                       "combinator": "and"}, "options": {}})
+    f.node("Retry allowed?", "if", 2.2, (4140, 160), {
+        "conditions": {"options": {"caseSensitive": True, "leftValue": "", "typeValidation": "strict", "version": 2},
+                       "conditions": [{"id": "retry", "leftValue": "={{ $json.retry_allowed }}", "rightValue": True,
+                                       "operator": {"type": "boolean", "operation": "true", "singleValue": True}}],
+                       "combinator": "and"}, "options": {}})
+    f.node("Maker call failed", "code", 2, (3480, 260), code(MAKER_FAILED))
+    f.node("Accept agent proposal", "code", 2, (4360, -60), code(ACCEPT))
+    f.node("Safe fallback", "code", 2, (4360, 260), code(js("checker.js") + FALLBACK),
+           notes="Rule-based easy session or rest; never an LLM output")
+    f.node("Proposal ready", "noOp", 1, (4600, 80))
+
+    f.link("Build daily context", "Read guardrails")
+    f.link("Read guardrails", "Parse guardrails")
+    f.link("Parse guardrails", "Start maker loop")
+    f.link("Start maker loop", "Prepare maker request")
+    f.link("Prepare maker request", "Maker · Claude Haiku")
+    f.link("Maker · Claude Haiku", "Parse proposal", 0)
+    f.link("Maker · Claude Haiku", "Maker call failed", 1)
+    f.link("Parse proposal", "Checker · guardrails")
+    f.link("Checker · guardrails", "Passed checker?")
+    f.link("Passed checker?", "Accept agent proposal", 0)
+    f.link("Passed checker?", "Retry allowed?", 1)
+    f.link("Retry allowed?", "Prepare maker request", 0)
+    f.link("Retry allowed?", "Safe fallback", 1)
+    f.link("Maker call failed", "Safe fallback")
+    f.link("Accept agent proposal", "Proposal ready")
+    f.link("Safe fallback", "Proposal ready")
     return {"id": MAIN_ID, "name": "Training Copilot", "active": False, "nodes": f.nodes,
             "connections": f.connections, "pinData": {},
             "settings": {"executionOrder": "v1", "timezone": "Europe/Lisbon",
                          "callerPolicy": "workflowsFromSameOwner"}}
 
 
-def runner_workflow():
+def runner_workflow(guardrails_file="guardrails.json"):
     scenarios = sorted(p.stem for p in (ROOT / "data" / "sample" / "scenarios").glob("s*.json"))
     f = Flow()
     f.node("Run test batch", "manualTrigger", 1, (0, 0))
     f.node("Scenario list", "code", 2, (220, 0), code(
         "// Every sample scenario, plus one live run (empty scenario_id)\n"
         f"const ids = {json.dumps(scenarios)};\n"
-        "return [...ids, ''].map((scenario_id) => ({ json: { scenario_id } }));"))
+        f"const guardrails_file = '{guardrails_file}'; // 'guardrails.test.json' = loop-mechanics test only\n"
+        "return [...ids, ''].map((scenario_id) => ({ json: { scenario_id, guardrails_file } }));"))
     f.node("Run Training Copilot", "executeWorkflow", 1.2, (440, 0), {
         "workflowId": {"__rl": True, "value": MAIN_ID, "mode": "id"},
-        "workflowInputs": {"mappingMode": "defineBelow", "value": {"scenario_id": "={{ $json.scenario_id }}"},
+        "workflowInputs": {"mappingMode": "defineBelow", "value": {"scenario_id": "={{ $json.scenario_id }}",
+                                                         "guardrails_file": "={{ $json.guardrails_file }}"},
                            "matchingColumns": [], "attemptToConvertTypes": False, "convertFieldsToString": True,
-                           "schema": [{"id": "scenario_id", "displayName": "scenario_id", "required": False,
-                                       "defaultMatch": False, "display": True, "canBeUsedToMatch": True,
-                                       "type": "string"}]},
+                           "schema": [{"id": k, "displayName": k, "required": False, "defaultMatch": False,
+                                       "display": True, "canBeUsedToMatch": True, "type": "string"}
+                                      for k in ("scenario_id", "guardrails_file")]},
         "mode": "each", "options": {"waitForSubWorkflow": True}})
     f.link("Run test batch", "Scenario list")
     f.link("Scenario list", "Run Training Copilot")
@@ -218,7 +354,9 @@ def runner_workflow():
 
 
 if __name__ == "__main__":
+    import sys
     out = ROOT / "workflows"
-    for name, wf in [("training-copilot.json", main_workflow()), ("test-runner.json", runner_workflow())]:
+    runner_cfg = "guardrails.test.json" if "--test-guardrails" in sys.argv else "guardrails.json"
+    for name, wf in [("training-copilot.json", main_workflow()), ("test-runner.json", runner_workflow(runner_cfg))]:
         (out / name).write_text(json.dumps(wf, indent=2) + "\n")
         print(f"wrote workflows/{name}: {len(wf['nodes'])} nodes")

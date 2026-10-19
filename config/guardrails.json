@@ -1,0 +1,49 @@
+{
+  "version": "2026-10-19.0",
+  "owner": "Bruno Diogo",
+  "note": "Thresholds are set by the athlete, not by the agent or its developer. A rule whose value is null is reported as not_configured on every run; it never passes silently.",
+  "max_maker_retries": 2,
+  "rules": {
+    "R1_hrv_drop": {
+      "description": "HRV more than X% below its 7-day baseline: no hard session",
+      "hrv_below_baseline_pct": null
+    },
+    "R2_short_sleep": {
+      "description": "Slept less than X hours: no hard session",
+      "min_sleep_hours": null
+    },
+    "R3_elevated_rhr": {
+      "description": "Resting HR more than X bpm above its 7-day baseline: easy session or rest",
+      "rhr_above_baseline_bpm": null
+    },
+    "R4_fatigue": {
+      "description": "Form (TSB) below X: easy session or rest",
+      "min_tsb": null
+    },
+    "R5_load_ramp": {
+      "description": "Last 7 days' load more than X% above the previous 7 days: no hard session",
+      "max_load_increase_pct": null
+    },
+    "R6_rest_overdue": {
+      "description": "X or more consecutive days without rest: rest or easy session",
+      "max_days_without_rest": null
+    },
+    "R7_duration_cap": {
+      "description": "Proposed duration at most X times the planned duration",
+      "max_duration_vs_plan": null
+    },
+    "R8_weather": {
+      "description": "Rain above X mm or gusts above Y km/h: no outdoor bike",
+      "max_precip_mm": null,
+      "max_gust_kmh": null
+    },
+    "R9_missing_data": {
+      "description": "HRV, resting HR or sleep missing today: intensity at most X (easy or moderate)",
+      "max_intensity": null
+    },
+    "R10_planned_rest": {
+      "description": "A planned rest day stays a rest day (true/false)",
+      "enforce": null
+    }
+  }
+}

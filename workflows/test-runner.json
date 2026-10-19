@@ -24,7 +24,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "// Every sample scenario, plus one live run (empty scenario_id)\nconst ids = [\"s01_good_recovery_intervals\", \"s02_low_hrv_hard_day\", \"s03_short_sleep_hard_day\", \"s04_load_spike\", \"s05_rain_long_ride\", \"s06_planned_rest_day\", \"s07_high_fatigue\", \"s08_missing_wellness\", \"s09_elevated_rhr\", \"s10_no_rest_12_days\"];\nreturn [...ids, ''].map((scenario_id) => ({ json: { scenario_id } }));"
+        "jsCode": "// Every sample scenario, plus one live run (empty scenario_id)\nconst ids = [\"s01_good_recovery_intervals\", \"s02_low_hrv_hard_day\", \"s03_short_sleep_hard_day\", \"s04_load_spike\", \"s05_rain_long_ride\", \"s06_planned_rest_day\", \"s07_high_fatigue\", \"s08_missing_wellness\", \"s09_elevated_rhr\", \"s10_no_rest_12_days\"];\nconst guardrails_file = 'guardrails.json'; // 'guardrails.test.json' = loop-mechanics test only\nreturn [...ids, ''].map((scenario_id) => ({ json: { scenario_id, guardrails_file } }));"
       }
     },
     {
@@ -45,7 +45,8 @@
         "workflowInputs": {
           "mappingMode": "defineBelow",
           "value": {
-            "scenario_id": "={{ $json.scenario_id }}"
+            "scenario_id": "={{ $json.scenario_id }}",
+            "guardrails_file": "={{ $json.guardrails_file }}"
           },
           "matchingColumns": [],
           "attemptToConvertTypes": false,
@@ -54,6 +55,15 @@
             {
               "id": "scenario_id",
               "displayName": "scenario_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "guardrails_file",
+              "displayName": "guardrails_file",
               "required": false,
               "defaultMatch": false,
               "display": true,

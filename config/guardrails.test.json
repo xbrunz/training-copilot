@@ -1,0 +1,49 @@
+{
+  "version": "TEST-ONLY",
+  "owner": "test fixture",
+  "note": "ARBITRARY VALUES for testing the maker/checker loop mechanics. Not training recommendations. Same values as tests/checker.test.js.",
+  "max_maker_retries": 2,
+  "rules": {
+    "R1_hrv_drop": {
+      "description": "HRV more than X% below its 7-day baseline: no hard session",
+      "hrv_below_baseline_pct": 10
+    },
+    "R2_short_sleep": {
+      "description": "Slept less than X hours: no hard session",
+      "min_sleep_hours": 6
+    },
+    "R3_elevated_rhr": {
+      "description": "Resting HR more than X bpm above its 7-day baseline: easy session or rest",
+      "rhr_above_baseline_bpm": 5
+    },
+    "R4_fatigue": {
+      "description": "Form (TSB) below X: easy session or rest",
+      "min_tsb": -20
+    },
+    "R5_load_ramp": {
+      "description": "Last 7 days' load more than X% above the previous 7 days: no hard session",
+      "max_load_increase_pct": 30
+    },
+    "R6_rest_overdue": {
+      "description": "X or more consecutive days without rest: rest or easy session",
+      "max_days_without_rest": 10
+    },
+    "R7_duration_cap": {
+      "description": "Proposed duration at most X times the planned duration",
+      "max_duration_vs_plan": 1.5
+    },
+    "R8_weather": {
+      "description": "Rain above X mm or gusts above Y km/h: no outdoor bike",
+      "max_precip_mm": 5,
+      "max_gust_kmh": 50
+    },
+    "R9_missing_data": {
+      "description": "HRV, resting HR or sleep missing today: intensity at most X (easy or moderate)",
+      "max_intensity": "easy"
+    },
+    "R10_planned_rest": {
+      "description": "A planned rest day stays a rest day (true/false)",
+      "enforce": true
+    }
+  }
+}
