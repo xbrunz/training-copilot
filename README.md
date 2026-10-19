@@ -21,7 +21,7 @@ It's a small, real system built to the standards I'd use for an HR operations ag
 ## Architecture
 
 ```mermaid
-flowchart LR
+flowchart TD
     T["Triggers<br/>21:00 schedule · manual · test runner"] --> C["1 · Collect<br/>intervals.icu · Open-Meteo · weekly plan<br/>(or a synthetic scenario)"]
     C --> X["Daily context<br/>numbers and categories only"]
     X --> M["2 · Maker<br/>Claude Haiku 5.5<br/>strict JSON schema"]
