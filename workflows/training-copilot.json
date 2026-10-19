@@ -1,0 +1,558 @@
+{
+  "id": "TrainCopilotMain",
+  "name": "Training Copilot",
+  "active": false,
+  "nodes": [
+    {
+      "id": "49f0a207-5c9a-5798-a3f2-cb07a1fc13ad",
+      "name": "Note: ## 1 \u00b7 Collect",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        -260
+      ],
+      "parameters": {
+        "content": "## 1 \u00b7 Collect\nRecovery and load (intervals.icu), weather (Open-Meteo), weekly plan. Scenarios replace the API calls for testing; everything after this is identical.",
+        "width": 1720,
+        "height": 760,
+        "color": 5
+      }
+    },
+    {
+      "id": "c5c0518c-3857-546a-a7c9-660a4a7a25a9",
+      "name": "Every day 21:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        40,
+        -100
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 21 * * *"
+            }
+          ]
+        }
+      },
+      "disabled": true,
+      "notes": "Disabled until the full pipeline is built"
+    },
+    {
+      "id": "dbb41038-c2ad-5b1b-afd1-63e185782022",
+      "name": "Run manually",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        40,
+        80
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "c4595e88-60dc-55b9-8010-a25a9f890e95",
+      "name": "Manual run settings",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        80
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "scn",
+              "name": "scenario_id",
+              "type": "string",
+              "value": "s01_good_recovery_intervals"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "Empty scenario_id = live data"
+    },
+    {
+      "id": "47151785-9964-545f-a182-ced785c6d81e",
+      "name": "Called by test runner",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        40,
+        260
+      ],
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "scenario_id",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "88129c66-7aa4-5f2d-96a0-6c9ba21d407d",
+      "name": "Run config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        80
+      ],
+      "parameters": {
+        "jsCode": "// Normalise the three entry points into one run config\nconst input = $input.first().json;\nconst scenarioId = input.scenario_id ? String(input.scenario_id) : null;\n// Guardrail on input: scenario IDs become file paths, so allow a strict pattern only\nif (scenarioId && !/^s[0-9]{2}_[a-z0-9_]{1,40}$/.test(scenarioId)) {\n  throw new Error(`Invalid scenario_id: ${scenarioId}`);\n}\nconst lisbon = $now.setZone('Europe/Lisbon');\nreturn [{ json: {\n  workflow_version: 'v0.2-collect',\n  n8n_execution_id: $execution.id,\n  run_started_at: new Date().toISOString(),\n  trigger: $('Every day 21:00').isExecuted ? 'schedule' : 'manual',\n  mode: scenarioId ? 'scenario' : 'live',\n  scenario_id: scenarioId,\n  today: lisbon.toISODate(),\n  target_date: lisbon.plus({ days: 1 }).toISODate(),\n} }];\n"
+      }
+    },
+    {
+      "id": "de82c69b-3b74-5758-8e28-a71f15b9e12d",
+      "name": "Live data?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        80
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "live",
+              "leftValue": "={{ $json.mode }}",
+              "rightValue": "live",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "73b8e646-981e-5098-96bc-fdd582038edb",
+      "name": "intervals.icu wellness",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        -60
+      ],
+      "parameters": {
+        "url": "https://intervals.icu/api/v1/athlete/0/wellness",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "oldest",
+              "value": "={{ DateTime.fromISO($json.today).minus({ days: 7 }).toISODate() }}"
+            },
+            {
+              "name": "newest",
+              "value": "={{ $json.today }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth"
+      },
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "intervalsApiKey1",
+          "name": "intervals.icu API key"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notes": "athlete/0 = the key's owner, so no athlete ID is stored in the workflow"
+    },
+    {
+      "id": "ea1c6ee9-e85e-55db-89bd-aacbc254a10b",
+      "name": "intervals.icu activities",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        -60
+      ],
+      "parameters": {
+        "url": "https://intervals.icu/api/v1/athlete/0/activities",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "oldest",
+              "value": "={{ DateTime.fromISO($('Run config').first().json.today).minus({ days: 13 }).toISODate() }}"
+            },
+            {
+              "name": "newest",
+              "value": "={{ $('Run config').first().json.today }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth"
+      },
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "intervalsApiKey1",
+          "name": "intervals.icu API key"
+        }
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "9c0a67c4-bf68-5cff-82b2-17a9ae70a6f1",
+      "name": "Open-Meteo forecast",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        -60
+      ],
+      "parameters": {
+        "url": "https://api.open-meteo.com/v1/forecast",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "latitude",
+              "value": "38.72"
+            },
+            {
+              "name": "longitude",
+              "value": "-9.14"
+            },
+            {
+              "name": "timezone",
+              "value": "Europe/Lisbon"
+            },
+            {
+              "name": "daily",
+              "value": "temperature_2m_min,temperature_2m_max,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max"
+            },
+            {
+              "name": "start_date",
+              "value": "={{ $('Run config').first().json.target_date }}"
+            },
+            {
+              "name": "end_date",
+              "value": "={{ $('Run config').first().json.target_date }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notes": "Lisbon. Free, no key."
+    },
+    {
+      "id": "81dd2643-77e2-51cb-a620-2efa18752db8",
+      "name": "Shape live data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        -60
+      ],
+      "parameters": {
+        "jsCode": "// intervals.icu returns arrays, which n8n splits into items: gather them back\nconst cfg = $('Run config').first().json;\nconst rows = (node) => $(node).all().map((i) => i.json).filter((j) => j && j.id);\nreturn [{ json: {\n  ...cfg,\n  wellness: rows('intervals.icu wellness'),\n  activities: rows('intervals.icu activities'),\n  weather: $('Open-Meteo forecast').first().json,\n} }];\n"
+      }
+    },
+    {
+      "id": "54769197-c892-558e-af39-5cf144b0df16",
+      "name": "Read scenario file",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        880,
+        240
+      ],
+      "parameters": {
+        "operation": "read",
+        "fileSelector": "=/data/sample/scenarios/{{ $json.scenario_id }}.json",
+        "options": {}
+      }
+    },
+    {
+      "id": "2a32d93f-5bd4-5ecb-894f-deec761a914b",
+      "name": "Parse scenario",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        240
+      ],
+      "parameters": {
+        "operation": "fromJson",
+        "options": {}
+      }
+    },
+    {
+      "id": "a7c2e4a6-00a3-5c3b-9a55-eb326703133f",
+      "name": "Shape scenario data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        240
+      ],
+      "parameters": {
+        "jsCode": "// A scenario file replaces the three API responses; everything downstream is identical\nconst cfg = $('Run config').first().json;\nconst s = $input.first().json.data;\nreturn [{ json: {\n  ...cfg,\n  target_date: s.target_date,\n  wellness: s.wellness,\n  activities: s.activities,\n  weather: s.weather,\n} }];\n"
+      }
+    },
+    {
+      "id": "52b284c0-68c6-5128-8d2b-f487cf8c061f",
+      "name": "Read weekly plan",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        1760,
+        80
+      ],
+      "parameters": {
+        "operation": "read",
+        "fileSelector": "/data/plan/weekly_plan.json",
+        "options": {}
+      }
+    },
+    {
+      "id": "f5933695-7669-5434-b9c8-559e10c5ac69",
+      "name": "Parse weekly plan",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        1980,
+        80
+      ],
+      "parameters": {
+        "operation": "fromJson",
+        "options": {}
+      }
+    },
+    {
+      "id": "7db4f0d7-dd21-57b6-be12-4cf6e9455023",
+      "name": "Build daily context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        80
+      ],
+      "parameters": {
+        "jsCode": "// Builds the \"daily context\": the only data the maker agent ever sees.\n// Pure function, so live API data and sample scenarios go through the same code.\n// Data minimisation: numbers and categories only. No names, activity titles,\n// GPS, device IDs or timestamps beyond the date.\n\nfunction buildContext({ targetDate, source, scenarioId, wellness, activities, weather, plan }) {\n  const addDays = (iso, n) => {\n    const d = new Date(iso + 'T12:00:00Z');\n    d.setUTCDate(d.getUTCDate() + n);\n    return d.toISOString().slice(0, 10);\n  };\n  const isNum = (v) => typeof v === 'number' && Number.isFinite(v) && v !== 0;\n  const round = (v, dp = 1) => (v == null ? null : Math.round(v * 10 ** dp) / 10 ** dp);\n  const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);\n\n  // \"today\" is the day the workflow runs (the evening before targetDate)\n  const today = addDays(targetDate, -1);\n  const byDate = Object.fromEntries((wellness || []).map((r) => [r.id, r]));\n  const todayRow = byDate[today] || {};\n  const prior7 = [1, 2, 3, 4, 5, 6, 7].map((i) => byDate[addDays(today, -i)]).filter(Boolean);\n\n  // --- Recovery: today vs own 7-day baseline (baseline excludes today)\n  const hrvBase = mean(prior7.map((r) => r.hrv).filter(isNum));\n  const rhrBase = mean(prior7.map((r) => r.restingHR).filter(isNum));\n  const hrv = isNum(todayRow.hrv) ? todayRow.hrv : null;\n  const rhr = isNum(todayRow.restingHR) ? todayRow.restingHR : null;\n  const recovery = {\n    hrv_ms: hrv,\n    hrv_baseline_7d_ms: round(hrvBase),\n    hrv_vs_baseline_pct: hrv && hrvBase ? round((hrv / hrvBase - 1) * 100) : null,\n    resting_hr_bpm: rhr,\n    resting_hr_baseline_7d_bpm: round(rhrBase),\n    resting_hr_vs_baseline_bpm: rhr && rhrBase ? round(rhr - rhrBase) : null,\n    sleep_hours: isNum(todayRow.sleepSecs) ? round(todayRow.sleepSecs / 3600) : null,\n    sleep_score: isNum(todayRow.sleepScore) ? todayRow.sleepScore : null,\n  };\n\n  // --- Load: fitness/fatigue from the latest row that has them, plus 7d vs previous 7d\n  const latestLoadRow = [todayRow, ...prior7].find((r) => isNum(r.ctl) && isNum(r.atl)) || {};\n  const acts = (activities || []).map((a) => ({\n    date: String(a.start_date_local || '').slice(0, 10),\n    sport: a.type,\n    load: Number(a.icu_training_load) || 0,\n  }));\n  const inWindow = (a, fromBack, toBack) => a.date >= addDays(today, -toBack) && a.date <= addDays(today, -fromBack);\n  const last7 = acts.filter((a) => inWindow(a, 0, 6));\n  const prev7 = acts.filter((a) => inWindow(a, 7, 13));\n  const sum = (xs) => xs.reduce((s, a) => s + a.load, 0);\n  const activeDays = new Set(last7.map((a) => a.date));\n  let daysSinceRest = 0;\n  while (daysSinceRest < 14 && acts.some((a) => a.date === addDays(today, -daysSinceRest))) daysSinceRest++;\n  const load7 = sum(last7);\n  const loadPrev7 = sum(prev7);\n  const load = {\n    ctl: round(latestLoadRow.ctl),\n    atl: round(latestLoadRow.atl),\n    tsb: latestLoadRow.ctl != null ? round(latestLoadRow.ctl - latestLoadRow.atl) : null,\n    load_7d: round(load7, 0),\n    load_prev_7d: round(loadPrev7, 0),\n    load_change_pct: loadPrev7 > 0 ? round((load7 / loadPrev7 - 1) * 100) : null,\n    sessions_7d: last7.length,\n    rest_days_7d: 7 - activeDays.size,\n    days_since_rest: daysSinceRest,\n    trained_today: activeDays.has(today),\n  };\n\n  // --- Weather for the target date (Open-Meteo daily block)\n  const d = (weather && weather.daily) || {};\n  const idx = (d.time || []).indexOf(targetDate);\n  const pick = (k) => (idx >= 0 && d[k] ? d[k][idx] : null);\n  const weatherOut = {\n    temp_min_c: pick('temperature_2m_min'),\n    temp_max_c: pick('temperature_2m_max'),\n    precip_mm: pick('precipitation_sum'),\n    precip_probability_pct: pick('precipitation_probability_max'),\n    wind_max_kmh: pick('wind_speed_10m_max'),\n    gust_max_kmh: pick('wind_gusts_10m_max'),\n  };\n\n  // --- Plan for the target weekday\n  const weekday = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][new Date(targetDate + 'T12:00:00Z').getUTCDay()];\n  const planned = (plan && plan.week && plan.week[weekday]) || null;\n\n  // --- Data quality: lets the guardrails act conservatively when data is missing\n  const missingToday = Object.entries({ hrv, resting_hr: rhr, sleep_hours: recovery.sleep_hours })\n    .filter(([, v]) => v == null)\n    .map(([k]) => k);\n  const dataQuality = {\n    wellness_days_7d: [0, 1, 2, 3, 4, 5, 6].filter((i) => isNum((byDate[addDays(today, -i)] || {}).hrv)).length,\n    missing_today: missingToday,\n    activities_14d: acts.length, // 0 means \"no data\", not \"fully rested\"\n    weather_available: idx >= 0,\n    plan_available: planned != null,\n  };\n\n  return {\n    target_date: targetDate,\n    weekday,\n    data_source: source,\n    scenario_id: scenarioId || null,\n    goal: plan ? plan.goal : null,\n    phase: plan ? plan.phase : null,\n    planned,\n    recovery,\n    load,\n    weather: weatherOut,\n    data_quality: dataQuality,\n  };\n}\n\n\n// --- n8n wrapper\nconst raw = $('Shape live data').isExecuted\n  ? $('Shape live data').first().json\n  : $('Shape scenario data').first().json;\nconst plan = $input.first().json.data;\nconst context = buildContext({\n  targetDate: raw.target_date, source: raw.mode, scenarioId: raw.scenario_id,\n  wellness: raw.wellness, activities: raw.activities, weather: raw.weather, plan,\n});\nconst run = {\n  workflow_version: raw.workflow_version, n8n_execution_id: raw.n8n_execution_id,\n  run_started_at: raw.run_started_at, trigger: raw.trigger, data_source: raw.mode,\n  scenario_id: raw.scenario_id, target_date: raw.target_date,\n};\nreturn [{ json: { run, context } }];\n"
+      },
+      "notes": "Data minimisation: only numbers and categories go to the agent"
+    }
+  ],
+  "connections": {
+    "Every day 21:00": {
+      "main": [
+        [
+          {
+            "node": "Run config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run manually": {
+      "main": [
+        [
+          {
+            "node": "Manual run settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual run settings": {
+      "main": [
+        [
+          {
+            "node": "Run config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Called by test runner": {
+      "main": [
+        [
+          {
+            "node": "Run config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run config": {
+      "main": [
+        [
+          {
+            "node": "Live data?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Live data?": {
+      "main": [
+        [
+          {
+            "node": "intervals.icu wellness",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read scenario file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "intervals.icu wellness": {
+      "main": [
+        [
+          {
+            "node": "intervals.icu activities",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "intervals.icu activities": {
+      "main": [
+        [
+          {
+            "node": "Open-Meteo forecast",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open-Meteo forecast": {
+      "main": [
+        [
+          {
+            "node": "Shape live data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape live data": {
+      "main": [
+        [
+          {
+            "node": "Read weekly plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read scenario file": {
+      "main": [
+        [
+          {
+            "node": "Parse scenario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse scenario": {
+      "main": [
+        [
+          {
+            "node": "Shape scenario data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape scenario data": {
+      "main": [
+        [
+          {
+            "node": "Read weekly plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read weekly plan": {
+      "main": [
+        [
+          {
+            "node": "Parse weekly plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse weekly plan": {
+      "main": [
+        [
+          {
+            "node": "Build daily context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Lisbon",
+    "callerPolicy": "workflowsFromSameOwner"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "goal": "IRONMAN 70.3 Cascais 2027",
+  "phase": "base",
+  "vocabulary": {
+    "sport": ["swim", "bike", "run", "strength", "rest"],
+    "intensity": ["easy", "moderate", "hard"],
+    "location": ["pool", "open_water", "outdoor", "trainer", "garage", "none"]
+  },
+  "week": {
+    "mon": { "sport": "rest", "duration_min": 0, "intensity": "easy", "location": "none", "focus": "Full rest" },
+    "tue": { "sport": "run", "duration_min": 50, "intensity": "hard", "location": "outdoor", "focus": "Intervals" },
+    "wed": { "sport": "swim", "duration_min": 45, "intensity": "moderate", "location": "pool", "focus": "Technique + aerobic sets" },
+    "thu": { "sport": "bike", "duration_min": 60, "intensity": "hard", "location": "trainer", "focus": "Sweet spot" },
+    "fri": { "sport": "strength", "duration_min": 40, "intensity": "moderate", "location": "garage", "focus": "Full body" },
+    "sat": { "sport": "bike", "duration_min": 150, "intensity": "easy", "location": "outdoor", "focus": "Long endurance ride" },
+    "sun": { "sport": "run", "duration_min": 75, "intensity": "easy", "location": "outdoor", "focus": "Long run" }
+  }
+}

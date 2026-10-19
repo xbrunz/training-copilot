@@ -1,0 +1,245 @@
+{
+ "scenario_id": "s01_good_recovery_intervals",
+ "description": "Normal recovery, intervals planned, dry weather",
+ "synthetic": true,
+ "target_date": "2026-10-20",
+ "wellness": [
+  {
+   "id": "2026-10-06",
+   "hrv": 61,
+   "restingHR": 49,
+   "sleepSecs": 25786,
+   "sleepScore": 85,
+   "ctl": 50.3,
+   "atl": 53.2
+  },
+  {
+   "id": "2026-10-07",
+   "hrv": 60,
+   "restingHR": 50,
+   "sleepSecs": 27183,
+   "sleepScore": 87,
+   "ctl": 50.6,
+   "atl": 50.1
+  },
+  {
+   "id": "2026-10-08",
+   "hrv": 62,
+   "restingHR": 48,
+   "sleepSecs": 28619,
+   "sleepScore": 81,
+   "ctl": 50.9,
+   "atl": 55.5
+  },
+  {
+   "id": "2026-10-09",
+   "hrv": 57,
+   "restingHR": 49,
+   "sleepSecs": 30030,
+   "sleepScore": 77,
+   "ctl": 51.3,
+   "atl": 50.2
+  },
+  {
+   "id": "2026-10-10",
+   "hrv": 62,
+   "restingHR": 49,
+   "sleepSecs": 27342,
+   "sleepScore": 76,
+   "ctl": 51.2,
+   "atl": 51.1
+  },
+  {
+   "id": "2026-10-11",
+   "hrv": 63,
+   "restingHR": 50,
+   "sleepSecs": 25859,
+   "sleepScore": 86,
+   "ctl": 51.4,
+   "atl": 51.0
+  },
+  {
+   "id": "2026-10-12",
+   "hrv": 64,
+   "restingHR": 50,
+   "sleepSecs": 25507,
+   "sleepScore": 85,
+   "ctl": 51.9,
+   "atl": 54.1
+  },
+  {
+   "id": "2026-10-13",
+   "hrv": 63,
+   "restingHR": 49,
+   "sleepSecs": 24749,
+   "sleepScore": 83,
+   "ctl": 52.4,
+   "atl": 51.9
+  },
+  {
+   "id": "2026-10-14",
+   "hrv": 61,
+   "restingHR": 49,
+   "sleepSecs": 27940,
+   "sleepScore": 77,
+   "ctl": 52.8,
+   "atl": 55.4
+  },
+  {
+   "id": "2026-10-15",
+   "hrv": 62,
+   "restingHR": 47,
+   "sleepSecs": 25582,
+   "sleepScore": 73,
+   "ctl": 52.9,
+   "atl": 54.3
+  },
+  {
+   "id": "2026-10-16",
+   "hrv": 62,
+   "restingHR": 51,
+   "sleepSecs": 26770,
+   "sleepScore": 77,
+   "ctl": 53.3,
+   "atl": 53.9
+  },
+  {
+   "id": "2026-10-17",
+   "hrv": 64,
+   "restingHR": 50,
+   "sleepSecs": 25733,
+   "sleepScore": 78,
+   "ctl": 53.6,
+   "atl": 56.3
+  },
+  {
+   "id": "2026-10-18",
+   "hrv": 68,
+   "restingHR": 50,
+   "sleepSecs": 26990,
+   "sleepScore": 84,
+   "ctl": 54.1,
+   "atl": 60.8
+  },
+  {
+   "id": "2026-10-19",
+   "hrv": 66,
+   "restingHR": 49,
+   "sleepSecs": 27333,
+   "sleepScore": 83,
+   "ctl": 54.3,
+   "atl": 51.8
+  }
+ ],
+ "activities": [
+  {
+   "id": "a1006",
+   "start_date_local": "2026-10-06T07:27:00",
+   "type": "Run",
+   "moving_time": 3000,
+   "icu_training_load": 62
+  },
+  {
+   "id": "a1007",
+   "start_date_local": "2026-10-07T07:29:00",
+   "type": "Swim",
+   "moving_time": 2700,
+   "icu_training_load": 41
+  },
+  {
+   "id": "a1008",
+   "start_date_local": "2026-10-08T07:12:00",
+   "type": "VirtualRide",
+   "moving_time": 3600,
+   "icu_training_load": 64
+  },
+  {
+   "id": "a1009",
+   "start_date_local": "2026-10-09T07:44:00",
+   "type": "WeightTraining",
+   "moving_time": 2400,
+   "icu_training_load": 32
+  },
+  {
+   "id": "a1010",
+   "start_date_local": "2026-10-10T07:33:00",
+   "type": "Ride",
+   "moving_time": 9000,
+   "icu_training_load": 141
+  },
+  {
+   "id": "a1011",
+   "start_date_local": "2026-10-11T07:39:00",
+   "type": "Run",
+   "moving_time": 4500,
+   "icu_training_load": 85
+  },
+  {
+   "id": "a1013",
+   "start_date_local": "2026-10-13T07:52:00",
+   "type": "Run",
+   "moving_time": 3000,
+   "icu_training_load": 76
+  },
+  {
+   "id": "a1014",
+   "start_date_local": "2026-10-14T07:21:00",
+   "type": "Swim",
+   "moving_time": 2700,
+   "icu_training_load": 50
+  },
+  {
+   "id": "a1015",
+   "start_date_local": "2026-10-15T07:04:00",
+   "type": "VirtualRide",
+   "moving_time": 3600,
+   "icu_training_load": 83
+  },
+  {
+   "id": "a1016",
+   "start_date_local": "2026-10-16T07:35:00",
+   "type": "WeightTraining",
+   "moving_time": 2400,
+   "icu_training_load": 33
+  },
+  {
+   "id": "a1017",
+   "start_date_local": "2026-10-17T07:01:00",
+   "type": "Ride",
+   "moving_time": 9000,
+   "icu_training_load": 149
+  },
+  {
+   "id": "a1018",
+   "start_date_local": "2026-10-18T07:06:00",
+   "type": "Run",
+   "moving_time": 4500,
+   "icu_training_load": 74
+  }
+ ],
+ "weather": {
+  "daily": {
+   "time": [
+    "2026-10-20"
+   ],
+   "temperature_2m_min": [
+    12.5
+   ],
+   "temperature_2m_max": [
+    22.0
+   ],
+   "precipitation_sum": [
+    0.0
+   ],
+   "precipitation_probability_max": [
+    5
+   ],
+   "wind_speed_10m_max": [
+    14.7
+   ],
+   "wind_gusts_10m_max": [
+    26.7
+   ]
+  }
+ }
+}

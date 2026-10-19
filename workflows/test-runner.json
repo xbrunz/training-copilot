@@ -1,0 +1,101 @@
+{
+  "id": "TrainCopilotTest",
+  "name": "Training Copilot \u00b7 test runner",
+  "active": false,
+  "nodes": [
+    {
+      "id": "a149cfb9-6dfc-5573-bb45-c90ba867eaa7",
+      "name": "Run test batch",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "fdfbd6fb-8f5b-5959-a5d6-452d3733e0e6",
+      "name": "Scenario list",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Every sample scenario, plus one live run (empty scenario_id)\nconst ids = [\"s01_good_recovery_intervals\", \"s02_low_hrv_hard_day\", \"s03_short_sleep_hard_day\", \"s04_load_spike\", \"s05_rain_long_ride\", \"s06_planned_rest_day\", \"s07_high_fatigue\", \"s08_missing_wellness\", \"s09_elevated_rhr\", \"s10_no_rest_12_days\"];\nreturn [...ids, ''].map((scenario_id) => ({ json: { scenario_id } }));"
+      }
+    },
+    {
+      "id": "9c626930-79d0-5a2c-8b6f-22a50d0e8dba",
+      "name": "Run Training Copilot",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "TrainCopilotMain",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "scenario_id": "={{ $json.scenario_id }}"
+          },
+          "matchingColumns": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true,
+          "schema": [
+            {
+              "id": "scenario_id",
+              "displayName": "scenario_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ]
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Run test batch": {
+      "main": [
+        [
+          {
+            "node": "Scenario list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scenario list": {
+      "main": [
+        [
+          {
+            "node": "Run Training Copilot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Lisbon"
+  }
+}
