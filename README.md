@@ -75,18 +75,18 @@ There are also structural checks: valid JSON, allowed vocabulary, sport/location
 
 ## Results
 
-13 completed runs on 2026-10-19: 12 synthetic scenarios and 1 live run (real weather; Garmin wellness data had not synced yet). Every decision was made by me in Telegram. Loop-mechanics tests against a test-only rule set are excluded. Reproduce with `./scripts/kpis.sh`.
+14 completed runs on 2026-10-19: 12 synthetic scenarios and 2 live runs: one on real weather before my Garmin history had synced, and one on my own Garmin data (recovery, load and activities). Every decision was made by me in Telegram. Real health values stay in the local database; only these aggregates are published. Loop-mechanics tests against a test-only rule set are excluded. Reproduce with `./scripts/kpis.sh`.
 
 | KPI | Value |
 |---|---|
-| Acceptance rate (approved as proposed) | 92.3% |
-| Human correction rate (Lighter or Rest) | 7.7% (the one correction was a deliberate test of the Lighter path) |
-| Checker rejection rate (per LLM proposal) | 7.1% (1 of 14; rule R9) |
-| Runs needing a retry | 7.7%, all corrected on the first retry |
+| Acceptance rate (approved as proposed) | 92.9% |
+| Human correction rate (Lighter or Rest) | 7.1% (the one correction was a deliberate test of the Lighter path) |
+| Checker rejection rate (per LLM proposal) | 6.7% (1 of 15; rule R9) |
+| Runs needing a retry | 7.1%, all corrected on the first retry |
 | Fallback rate | 0% |
-| **Average cost per run** | **$0.00033** (≈ 1,724 input + 320 output tokens) |
+| **Average cost per run** | **$0.00033** (≈ 1,713 input + 311 output tokens) |
 | Agent latency (collect → proposal) | 3.0 s average, 3.8 s p90 |
-| Median human response time | 4 min 34 s |
+| Median human response time | 4 min 33 s |
 
 What the numbers say:
 - **The checker is a backstop, not the main control.** The maker already follows the policy in most cases. The one rejection was a proposal that ignored missing recovery data, fixed on the retry using the checker's stated reason.
@@ -141,7 +141,7 @@ tests/                unit tests for context builder, checker, maker parser, app
 
 ## Limitations and next steps
 
-- Garmin → intervals.icu wellness data had not synced when these numbers were produced, so results come from synthetic scenarios.
+- Most runs so far use synthetic scenarios; real-data runs start with one. Fitness and fatigue (CTL/ATL) are understated until my full activity history is in intervals.icu.
 - Approval works from the machine running n8n only. Approving from a phone would need a tunnel, which also exposes n8n publicly, so it's a deliberate trade-off.
 - n8n doesn't report how many HTTP retries it made, so `http_retries` is stored as unknown (NULL) rather than a misleading 0.
 - Planned next: an error workflow with Telegram alerts, a KPI dashboard and evaluation set, pushing approved sessions to the intervals.icu calendar, and a section on running this for an HR Ops team at scale.
