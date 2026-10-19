@@ -306,7 +306,7 @@ def main_workflow():
     f = Flow()
     f.sticky("## 1 · Collect\nRecovery and load (intervals.icu), weather (Open-Meteo), weekly plan. "
              "Scenarios replace the API calls for testing; everything after this is identical.",
-             (-20, -260), (1720, 760), color=5)
+             (-20, -260), (2360, 760), color=5)
     f.node("Every day 21:00", "scheduleTrigger", 1.2, (40, -100),
            {"rule": {"interval": [{"field": "cronExpression", "expression": "0 21 * * *"}]}},
            disabled=True, notes="Disabled until the full pipeline is built")
@@ -486,6 +486,13 @@ def main_workflow():
     f.link("Answered by button?", "Show confirmation page", 0)
     f.link("Answered by button?", "Update Telegram message", 1)
     f.link("Show confirmation page", "Update Telegram message")
+    # Stack the three sections vertically so the whole canvas fits on one screen
+    for n in f.nodes:
+        x, y = n["position"]
+        if x >= 4780:
+            n["position"] = [x - 4800, y + 2000]
+        elif x >= 2400:
+            n["position"] = [x - 2420, y + 1000]
     return {"id": MAIN_ID, "name": "Training Copilot", "active": False, "nodes": f.nodes,
             "connections": f.connections, "pinData": {},
             "settings": {"executionOrder": "v1", "timezone": "Europe/Lisbon",

@@ -14,7 +14,7 @@
       ],
       "parameters": {
         "content": "## 1 \u00b7 Collect\nRecovery and load (intervals.icu), weather (Open-Meteo), weekly plan. Scenarios replace the API calls for testing; everything after this is identical.",
-        "width": 1720,
+        "width": 2360,
         "height": 760,
         "color": 5
       }
@@ -384,8 +384,8 @@
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        2400,
-        -260
+        -20,
+        740
       ],
       "parameters": {
         "content": "## 2 \u00b7 Maker / checker\nClaude Haiku proposes (strict JSON schema). Deterministic rules check. Rejected: retry with the reasons (max from config). Still rejected or API down: safe fallback.",
@@ -400,8 +400,8 @@
       "type": "n8n-nodes-base.readWriteFile",
       "typeVersion": 1,
       "position": [
-        2460,
-        80
+        40,
+        1080
       ],
       "parameters": {
         "operation": "read",
@@ -416,8 +416,8 @@
       "type": "n8n-nodes-base.extractFromFile",
       "typeVersion": 1,
       "position": [
-        2660,
-        80
+        240,
+        1080
       ],
       "parameters": {
         "operation": "fromJson",
@@ -430,8 +430,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2860,
-        80
+        440,
+        1080
       ],
       "parameters": {
         "jsCode": "// Loop state travels in the item: run, context, guardrails, and every attempt so far\nconst g = $input.first().json.data;\nconst { run, context } = $('Build daily context').first().json;\nreturn [{ json: { run, context, guardrails: g, rules_version: g.version, attempts: [] } }];\n"
@@ -443,8 +443,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3060,
-        80
+        640,
+        1080
       ],
       "parameters": {
         "jsCode": "// Maker: builds the Claude request and parses the reply.\n// The maker knows the guardrail *policy* in plain words but not the thresholds;\n// the checker enforces the numbers. Each attempt is a fresh single-turn request\n// (previous rejections are quoted in the prompt), so nothing depends on replaying\n// earlier model output.\n\nconst MAKER_MODEL = 'claude-haiku-5-5';\n\nconst SYSTEM_PROMPT = `You plan tomorrow's single training session for an amateur triathlete preparing for an IRONMAN 70.3.\n\nYou receive a JSON \"daily context\": the planned session for tomorrow, recovery signals compared with the athlete's own 7-day baseline, recent training load, tomorrow's weather in Lisbon, and data-quality flags.\n\nHow to decide:\n- Start from the planned session. Keep it unless the data gives a reason to change it.\n- When recovery signals are worse than baseline (lower HRV, higher resting heart rate, short sleep), fatigue is high, load has ramped up quickly, or many days have passed without rest, reduce intensity first, then duration, and choose rest when several signals agree.\n- When data is missing, be more conservative, not less.\n- Bad weather for an outdoor ride: move it to the indoor trainer rather than skipping it.\n- Never make a session longer or harder than planned.\n- A rest day has duration 0, intensity \"easy\" and location \"none\".\n\nWrite \"focus\" as a short workout description (for example \"6 x 3 min at threshold, 2 min easy\"). Write \"rationale\" in at most two sentences, naming the signals that drove the decision. Set \"changed_from_plan\" to true if sport, duration, intensity or location differs from the plan.\n\nYour proposal is checked by deterministic safety rules before a human approves it. If a previous proposal was rejected, the reasons are listed: fix them without changing anything else.`;\n\nconst PROPOSAL_SCHEMA = {\n  type: 'object',\n  additionalProperties: false,\n  required: ['sport', 'duration_min', 'intensity', 'location', 'focus', 'changed_from_plan', 'rationale'],\n  properties: {\n    sport: { type: 'string', enum: ['swim', 'bike', 'run', 'strength', 'rest'] },\n    duration_min: { type: 'integer' },\n    intensity: { type: 'string', enum: ['easy', 'moderate', 'hard'] },\n    location: { type: 'string', enum: ['pool', 'open_water', 'outdoor', 'trainer', 'garage', 'none'] },\n    focus: { type: 'string' },\n    changed_from_plan: { type: 'boolean' },\n    rationale: { type: 'string' },\n  },\n};\n\nfunction buildMakerRequest(context, attempts) {\n  let user = `Daily context:\\n${JSON.stringify(context, null, 1)}`;\n  const rejected = attempts.filter((a) => a.verdict && !a.verdict.passed);\n  if (rejected.length) {\n    user += '\\n\\nPrevious proposals were rejected by the safety checker:';\n    for (const a of rejected) {\n      user += `\\n- Attempt ${a.attempt}: ${JSON.stringify(a.proposal)}\\n  Reasons: ${a.verdict.violations.map((v) => v.message).join('; ')}`;\n    }\n    user += '\\nPropose a corrected session.';\n  }\n  return {\n    model: MAKER_MODEL,\n    max_tokens: 4000,\n    output_config: { effort: 'low', format: { type: 'json_schema', schema: PROPOSAL_SCHEMA } },\n    system: SYSTEM_PROMPT,\n    messages: [{ role: 'user', content: user }],\n  };\n}\n\n// Never throws: an unusable reply becomes proposal=null with a reason,\n// which the checker rejects as S0_parse and the loop treats like any rejection.\nfunction parseMakerResponse(resp) {\n  const usage = (resp && resp.usage) || {};\n  const out = {\n    proposal: null,\n    stop_reason: resp ? resp.stop_reason : null,\n    input_tokens: usage.input_tokens != null ? usage.input_tokens : null,\n    output_tokens: usage.output_tokens != null ? usage.output_tokens : null,\n    model: resp && resp.model ? resp.model : MAKER_MODEL,\n    error: null,\n  };\n  if (!resp || !Array.isArray(resp.content)) {\n    out.error = 'No message in response';\n    return out;\n  }\n  if (resp.stop_reason === 'refusal') {\n    out.error = `Refused (${(resp.stop_details && resp.stop_details.category) || 'no category'})`;\n    return out;\n  }\n  if (resp.stop_reason === 'max_tokens') {\n    out.error = 'Hit max_tokens before finishing';\n    return out;\n  }\n  const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('');\n  try {\n    out.proposal = JSON.parse(text);\n  } catch (e) {\n    out.error = 'Reply was not valid JSON';\n  }\n  return out;\n}\n\n\n// --- n8n wrapper: one request per attempt; earlier rejections are quoted in the prompt\nconst s = $input.first().json;\nconst attempt = s.attempts.length + 1;\nreturn [{ json: {\n  ...s,\n  attempt,\n  call_started_at: new Date().toISOString(),\n  call_started_ms: Date.now(),\n  request_body: buildMakerRequest(s.context, s.attempts),\n} }];\n"
@@ -456,8 +456,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        3260,
-        80
+        840,
+        1080
       ],
       "parameters": {
         "method": "POST",
@@ -498,8 +498,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3480,
-        0
+        1060,
+        1000
       ],
       "parameters": {
         "jsCode": "// Maker: builds the Claude request and parses the reply.\n// The maker knows the guardrail *policy* in plain words but not the thresholds;\n// the checker enforces the numbers. Each attempt is a fresh single-turn request\n// (previous rejections are quoted in the prompt), so nothing depends on replaying\n// earlier model output.\n\nconst MAKER_MODEL = 'claude-haiku-5-5';\n\nconst SYSTEM_PROMPT = `You plan tomorrow's single training session for an amateur triathlete preparing for an IRONMAN 70.3.\n\nYou receive a JSON \"daily context\": the planned session for tomorrow, recovery signals compared with the athlete's own 7-day baseline, recent training load, tomorrow's weather in Lisbon, and data-quality flags.\n\nHow to decide:\n- Start from the planned session. Keep it unless the data gives a reason to change it.\n- When recovery signals are worse than baseline (lower HRV, higher resting heart rate, short sleep), fatigue is high, load has ramped up quickly, or many days have passed without rest, reduce intensity first, then duration, and choose rest when several signals agree.\n- When data is missing, be more conservative, not less.\n- Bad weather for an outdoor ride: move it to the indoor trainer rather than skipping it.\n- Never make a session longer or harder than planned.\n- A rest day has duration 0, intensity \"easy\" and location \"none\".\n\nWrite \"focus\" as a short workout description (for example \"6 x 3 min at threshold, 2 min easy\"). Write \"rationale\" in at most two sentences, naming the signals that drove the decision. Set \"changed_from_plan\" to true if sport, duration, intensity or location differs from the plan.\n\nYour proposal is checked by deterministic safety rules before a human approves it. If a previous proposal was rejected, the reasons are listed: fix them without changing anything else.`;\n\nconst PROPOSAL_SCHEMA = {\n  type: 'object',\n  additionalProperties: false,\n  required: ['sport', 'duration_min', 'intensity', 'location', 'focus', 'changed_from_plan', 'rationale'],\n  properties: {\n    sport: { type: 'string', enum: ['swim', 'bike', 'run', 'strength', 'rest'] },\n    duration_min: { type: 'integer' },\n    intensity: { type: 'string', enum: ['easy', 'moderate', 'hard'] },\n    location: { type: 'string', enum: ['pool', 'open_water', 'outdoor', 'trainer', 'garage', 'none'] },\n    focus: { type: 'string' },\n    changed_from_plan: { type: 'boolean' },\n    rationale: { type: 'string' },\n  },\n};\n\nfunction buildMakerRequest(context, attempts) {\n  let user = `Daily context:\\n${JSON.stringify(context, null, 1)}`;\n  const rejected = attempts.filter((a) => a.verdict && !a.verdict.passed);\n  if (rejected.length) {\n    user += '\\n\\nPrevious proposals were rejected by the safety checker:';\n    for (const a of rejected) {\n      user += `\\n- Attempt ${a.attempt}: ${JSON.stringify(a.proposal)}\\n  Reasons: ${a.verdict.violations.map((v) => v.message).join('; ')}`;\n    }\n    user += '\\nPropose a corrected session.';\n  }\n  return {\n    model: MAKER_MODEL,\n    max_tokens: 4000,\n    output_config: { effort: 'low', format: { type: 'json_schema', schema: PROPOSAL_SCHEMA } },\n    system: SYSTEM_PROMPT,\n    messages: [{ role: 'user', content: user }],\n  };\n}\n\n// Never throws: an unusable reply becomes proposal=null with a reason,\n// which the checker rejects as S0_parse and the loop treats like any rejection.\nfunction parseMakerResponse(resp) {\n  const usage = (resp && resp.usage) || {};\n  const out = {\n    proposal: null,\n    stop_reason: resp ? resp.stop_reason : null,\n    input_tokens: usage.input_tokens != null ? usage.input_tokens : null,\n    output_tokens: usage.output_tokens != null ? usage.output_tokens : null,\n    model: resp && resp.model ? resp.model : MAKER_MODEL,\n    error: null,\n  };\n  if (!resp || !Array.isArray(resp.content)) {\n    out.error = 'No message in response';\n    return out;\n  }\n  if (resp.stop_reason === 'refusal') {\n    out.error = `Refused (${(resp.stop_details && resp.stop_details.category) || 'no category'})`;\n    return out;\n  }\n  if (resp.stop_reason === 'max_tokens') {\n    out.error = 'Hit max_tokens before finishing';\n    return out;\n  }\n  const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('');\n  try {\n    out.proposal = JSON.parse(text);\n  } catch (e) {\n    out.error = 'Reply was not valid JSON';\n  }\n  return out;\n}\n\n\n// --- n8n wrapper: recover loop state from the request node, record this call\nconst s = $('Prepare maker request').last().json;\nconst parsed = parseMakerResponse($input.first().json);\nconst call = {\n  attempt: s.attempt, model: parsed.model, started_at: s.call_started_at,\n  latency_ms: Date.now() - s.call_started_ms, stop_reason: parsed.stop_reason,\n  input_tokens: parsed.input_tokens, output_tokens: parsed.output_tokens, error: parsed.error,\n};\nconst { request_body, call_started_ms, call_started_at, ...state } = s;\nreturn [{ json: { ...state, proposal: parsed.proposal, call } }];\n"
@@ -511,8 +511,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3700,
-        0
+        1280,
+        1000
       ],
       "parameters": {
         "jsCode": "// Checker: deterministic guardrails over the maker's proposal.\n// No LLM involved. Every rule returns a reason, so each rejection is explainable\n// and feeds back into the maker's retry. Thresholds come from config/guardrails.json.\n\nconst INTENSITY_RANK = { easy: 0, moderate: 1, hard: 2 };\nconst LOCATIONS = {\n  swim: ['pool', 'open_water'],\n  bike: ['outdoor', 'trainer'],\n  run: ['outdoor', 'trainer'],\n  strength: ['garage'],\n  rest: ['none'],\n};\n\nfunction checkProposal(proposal, context, config) {\n  const violations = [];\n  const notConfigured = [];\n  const fail = (rule_id, message) => violations.push({ rule_id, message });\n  const rules = config.rules;\n  const value = (ruleId, key) => {\n    const v = rules[ruleId] ? rules[ruleId][key] : null;\n    if (v == null && !notConfigured.includes(ruleId)) notConfigured.push(ruleId);\n    return v;\n  };\n\n  // --- S: structural checks, always on\n  if (!proposal || typeof proposal !== 'object') {\n    return { passed: false, violations: [{ rule_id: 'S0_parse', message: 'No valid JSON proposal' }], not_configured: [] };\n  }\n  const p = proposal;\n  if (!LOCATIONS[p.sport]) fail('S1_vocabulary', `Unknown sport \"${p.sport}\"`);\n  if (!(p.intensity in INTENSITY_RANK)) fail('S1_vocabulary', `Unknown intensity \"${p.intensity}\"`);\n  if (!Number.isInteger(p.duration_min) || p.duration_min < 0) fail('S1_vocabulary', 'duration_min must be a non-negative integer');\n  if (violations.length) return { passed: false, violations, not_configured: [] };\n  if (!LOCATIONS[p.sport].includes(p.location)) fail('S2_location', `${p.sport} cannot be done at \"${p.location}\"`);\n  if (p.sport === 'rest' && (p.duration_min !== 0 || p.intensity !== 'easy')) fail('S3_rest_shape', 'Rest must have duration 0 and intensity easy');\n  if (p.sport !== 'rest' && p.duration_min === 0) fail('S3_rest_shape', 'A training session needs a duration above 0');\n\n  const isHard = p.intensity === 'hard';\n  const easyOrRest = p.sport === 'rest' || p.intensity === 'easy';\n  const r = context.recovery || {};\n  const l = context.load || {};\n  const w = context.weather || {};\n  const planned = context.planned || {};\n\n  // --- R: athlete-configured guardrails. A rule only fires when its signal is present.\n  const hrvDrop = value('R1_hrv_drop', 'hrv_below_baseline_pct');\n  if (hrvDrop != null && r.hrv_vs_baseline_pct != null && r.hrv_vs_baseline_pct < -hrvDrop && isHard)\n    fail('R1_hrv_drop', `HRV is ${-r.hrv_vs_baseline_pct}% below baseline (limit ${hrvDrop}%): no hard session`);\n\n  const minSleep = value('R2_short_sleep', 'min_sleep_hours');\n  if (minSleep != null && r.sleep_hours != null && r.sleep_hours < minSleep && isHard)\n    fail('R2_short_sleep', `Slept ${r.sleep_hours} h (minimum ${minSleep} h): no hard session`);\n\n  const rhrUp = value('R3_elevated_rhr', 'rhr_above_baseline_bpm');\n  if (rhrUp != null && r.resting_hr_vs_baseline_bpm != null && r.resting_hr_vs_baseline_bpm > rhrUp && !easyOrRest)\n    fail('R3_elevated_rhr', `Resting HR is +${r.resting_hr_vs_baseline_bpm} bpm (limit +${rhrUp}): easy or rest only`);\n\n  const minTsb = value('R4_fatigue', 'min_tsb');\n  if (minTsb != null && l.tsb != null && l.tsb < minTsb && !easyOrRest)\n    fail('R4_fatigue', `Form (TSB) is ${l.tsb} (minimum ${minTsb}): easy or rest only`);\n\n  const maxRamp = value('R5_load_ramp', 'max_load_increase_pct');\n  if (maxRamp != null && l.load_change_pct != null && l.load_change_pct > maxRamp && isHard)\n    fail('R5_load_ramp', `Load is up ${l.load_change_pct}% week on week (limit ${maxRamp}%): no hard session`);\n\n  const maxStreak = value('R6_rest_overdue', 'max_days_without_rest');\n  if (maxStreak != null && l.days_since_rest != null && l.days_since_rest >= maxStreak && !easyOrRest)\n    fail('R6_rest_overdue', `${l.days_since_rest} days without rest (limit ${maxStreak}): rest or easy only`);\n\n  const maxDur = value('R7_duration_cap', 'max_duration_vs_plan');\n  if (maxDur != null && planned.duration_min > 0 && p.duration_min > planned.duration_min * maxDur)\n    fail('R7_duration_cap', `${p.duration_min} min exceeds ${maxDur} x planned ${planned.duration_min} min`);\n\n  const maxRain = value('R8_weather', 'max_precip_mm');\n  const maxGust = value('R8_weather', 'max_gust_kmh');\n  const badWeather = (maxRain != null && w.precip_mm != null && w.precip_mm > maxRain)\n    || (maxGust != null && w.gust_max_kmh != null && w.gust_max_kmh > maxGust);\n  if (badWeather && p.sport === 'bike' && p.location === 'outdoor')\n    fail('R8_weather', `Forecast ${w.precip_mm} mm rain, gusts ${w.gust_max_kmh} km/h: no outdoor ride`);\n\n  const maxWhenMissing = value('R9_missing_data', 'max_intensity');\n  const missing = (context.data_quality && context.data_quality.missing_today) || [];\n  if (maxWhenMissing != null && missing.length && INTENSITY_RANK[p.intensity] > INTENSITY_RANK[maxWhenMissing])\n    fail('R9_missing_data', `Missing today: ${missing.join(', ')}. Intensity capped at ${maxWhenMissing}`);\n\n  const keepRest = value('R10_planned_rest', 'enforce');\n  if (keepRest === true && planned.sport === 'rest' && p.sport !== 'rest')\n    fail('R10_planned_rest', 'Planned rest day must stay rest');\n\n  return { passed: violations.length === 0, violations, not_configured: notConfigured };\n}\n\n// Safe fallback when the maker fails or exhausts its retries: never an LLM output.\n// Easy version of the planned session (indoors if it was an outdoor ride); rest if\n// that still breaks a rule. Rest passes every rule by construction.\nfunction safeFallback(context, config) {\n  const rest = { sport: 'rest', duration_min: 0, intensity: 'easy', location: 'none',\n    focus: 'Rest day', changed_from_plan: true, rationale: 'Safe fallback: rest.' };\n  const planned = context.planned;\n  if (!planned || planned.sport === 'rest') return { ...rest, changed_from_plan: false };\n  const easy = {\n    sport: planned.sport,\n    duration_min: planned.duration_min,\n    intensity: 'easy',\n    location: planned.sport === 'bike' ? 'trainer' : planned.location,\n    focus: `Easy ${planned.sport}`,\n    changed_from_plan: true,\n    rationale: 'Safe fallback: easy version of the planned session.',\n  };\n  return checkProposal(easy, context, config).passed ? easy : rest;\n}\n\n\n// --- n8n wrapper: deterministic verdict, appended to the attempt history\nconst s = $input.first().json;\nconst verdict = checkProposal(s.proposal, s.context, s.guardrails);\nconst attempts = [...s.attempts, { attempt: s.attempt, proposal: s.proposal, verdict, call: s.call }];\nconst maxAttempts = 1 + Math.min(Number(s.guardrails.max_maker_retries) || 0, 4); // hard cap\nreturn [{ json: { ...s, attempts, verdict, retry_allowed: !verdict.passed && attempts.length < maxAttempts } }];\n"
@@ -525,8 +525,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        3920,
-        0
+        1500,
+        1000
       ],
       "parameters": {
         "conditions": {
@@ -559,8 +559,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        4140,
-        160
+        1720,
+        1160
       ],
       "parameters": {
         "conditions": {
@@ -593,8 +593,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3480,
-        260
+        1060,
+        1260
       ],
       "parameters": {
         "jsCode": "// The API call failed after its HTTP retries: no point re-asking the model\nconst s = $('Prepare maker request').last().json;\nconst err = $input.first().json.error || {};\nconst call = { attempt: s.attempt, model: 'claude-haiku-5-5', started_at: s.call_started_at,\n  latency_ms: Date.now() - s.call_started_ms, stop_reason: null, input_tokens: null, output_tokens: null,\n  error: `HTTP error: ${err.message || JSON.stringify(err).slice(0, 200)}` };\nconst { request_body, call_started_ms, call_started_at, ...state } = s;\nconst verdict = { passed: false, violations: [{ rule_id: 'S0_api', message: call.error }], not_configured: [] };\nreturn [{ json: { ...state, attempts: [...s.attempts, { attempt: s.attempt, proposal: null, verdict, call }] } }];\n"
@@ -606,8 +606,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        4360,
-        -60
+        1940,
+        940
       ],
       "parameters": {
         "jsCode": "// Checker passed: the agent's proposal goes to the human\nconst s = $input.first().json;\nreturn [{ json: { run: s.run, context: s.context, rules_version: s.rules_version, attempts: s.attempts,\n  final: { origin: 'agent', proposal: s.proposal, verdict: s.verdict } } }];\n"
@@ -619,8 +619,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        4360,
-        260
+        1940,
+        1260
       ],
       "parameters": {
         "jsCode": "// Checker: deterministic guardrails over the maker's proposal.\n// No LLM involved. Every rule returns a reason, so each rejection is explainable\n// and feeds back into the maker's retry. Thresholds come from config/guardrails.json.\n\nconst INTENSITY_RANK = { easy: 0, moderate: 1, hard: 2 };\nconst LOCATIONS = {\n  swim: ['pool', 'open_water'],\n  bike: ['outdoor', 'trainer'],\n  run: ['outdoor', 'trainer'],\n  strength: ['garage'],\n  rest: ['none'],\n};\n\nfunction checkProposal(proposal, context, config) {\n  const violations = [];\n  const notConfigured = [];\n  const fail = (rule_id, message) => violations.push({ rule_id, message });\n  const rules = config.rules;\n  const value = (ruleId, key) => {\n    const v = rules[ruleId] ? rules[ruleId][key] : null;\n    if (v == null && !notConfigured.includes(ruleId)) notConfigured.push(ruleId);\n    return v;\n  };\n\n  // --- S: structural checks, always on\n  if (!proposal || typeof proposal !== 'object') {\n    return { passed: false, violations: [{ rule_id: 'S0_parse', message: 'No valid JSON proposal' }], not_configured: [] };\n  }\n  const p = proposal;\n  if (!LOCATIONS[p.sport]) fail('S1_vocabulary', `Unknown sport \"${p.sport}\"`);\n  if (!(p.intensity in INTENSITY_RANK)) fail('S1_vocabulary', `Unknown intensity \"${p.intensity}\"`);\n  if (!Number.isInteger(p.duration_min) || p.duration_min < 0) fail('S1_vocabulary', 'duration_min must be a non-negative integer');\n  if (violations.length) return { passed: false, violations, not_configured: [] };\n  if (!LOCATIONS[p.sport].includes(p.location)) fail('S2_location', `${p.sport} cannot be done at \"${p.location}\"`);\n  if (p.sport === 'rest' && (p.duration_min !== 0 || p.intensity !== 'easy')) fail('S3_rest_shape', 'Rest must have duration 0 and intensity easy');\n  if (p.sport !== 'rest' && p.duration_min === 0) fail('S3_rest_shape', 'A training session needs a duration above 0');\n\n  const isHard = p.intensity === 'hard';\n  const easyOrRest = p.sport === 'rest' || p.intensity === 'easy';\n  const r = context.recovery || {};\n  const l = context.load || {};\n  const w = context.weather || {};\n  const planned = context.planned || {};\n\n  // --- R: athlete-configured guardrails. A rule only fires when its signal is present.\n  const hrvDrop = value('R1_hrv_drop', 'hrv_below_baseline_pct');\n  if (hrvDrop != null && r.hrv_vs_baseline_pct != null && r.hrv_vs_baseline_pct < -hrvDrop && isHard)\n    fail('R1_hrv_drop', `HRV is ${-r.hrv_vs_baseline_pct}% below baseline (limit ${hrvDrop}%): no hard session`);\n\n  const minSleep = value('R2_short_sleep', 'min_sleep_hours');\n  if (minSleep != null && r.sleep_hours != null && r.sleep_hours < minSleep && isHard)\n    fail('R2_short_sleep', `Slept ${r.sleep_hours} h (minimum ${minSleep} h): no hard session`);\n\n  const rhrUp = value('R3_elevated_rhr', 'rhr_above_baseline_bpm');\n  if (rhrUp != null && r.resting_hr_vs_baseline_bpm != null && r.resting_hr_vs_baseline_bpm > rhrUp && !easyOrRest)\n    fail('R3_elevated_rhr', `Resting HR is +${r.resting_hr_vs_baseline_bpm} bpm (limit +${rhrUp}): easy or rest only`);\n\n  const minTsb = value('R4_fatigue', 'min_tsb');\n  if (minTsb != null && l.tsb != null && l.tsb < minTsb && !easyOrRest)\n    fail('R4_fatigue', `Form (TSB) is ${l.tsb} (minimum ${minTsb}): easy or rest only`);\n\n  const maxRamp = value('R5_load_ramp', 'max_load_increase_pct');\n  if (maxRamp != null && l.load_change_pct != null && l.load_change_pct > maxRamp && isHard)\n    fail('R5_load_ramp', `Load is up ${l.load_change_pct}% week on week (limit ${maxRamp}%): no hard session`);\n\n  const maxStreak = value('R6_rest_overdue', 'max_days_without_rest');\n  if (maxStreak != null && l.days_since_rest != null && l.days_since_rest >= maxStreak && !easyOrRest)\n    fail('R6_rest_overdue', `${l.days_since_rest} days without rest (limit ${maxStreak}): rest or easy only`);\n\n  const maxDur = value('R7_duration_cap', 'max_duration_vs_plan');\n  if (maxDur != null && planned.duration_min > 0 && p.duration_min > planned.duration_min * maxDur)\n    fail('R7_duration_cap', `${p.duration_min} min exceeds ${maxDur} x planned ${planned.duration_min} min`);\n\n  const maxRain = value('R8_weather', 'max_precip_mm');\n  const maxGust = value('R8_weather', 'max_gust_kmh');\n  const badWeather = (maxRain != null && w.precip_mm != null && w.precip_mm > maxRain)\n    || (maxGust != null && w.gust_max_kmh != null && w.gust_max_kmh > maxGust);\n  if (badWeather && p.sport === 'bike' && p.location === 'outdoor')\n    fail('R8_weather', `Forecast ${w.precip_mm} mm rain, gusts ${w.gust_max_kmh} km/h: no outdoor ride`);\n\n  const maxWhenMissing = value('R9_missing_data', 'max_intensity');\n  const missing = (context.data_quality && context.data_quality.missing_today) || [];\n  if (maxWhenMissing != null && missing.length && INTENSITY_RANK[p.intensity] > INTENSITY_RANK[maxWhenMissing])\n    fail('R9_missing_data', `Missing today: ${missing.join(', ')}. Intensity capped at ${maxWhenMissing}`);\n\n  const keepRest = value('R10_planned_rest', 'enforce');\n  if (keepRest === true && planned.sport === 'rest' && p.sport !== 'rest')\n    fail('R10_planned_rest', 'Planned rest day must stay rest');\n\n  return { passed: violations.length === 0, violations, not_configured: notConfigured };\n}\n\n// Safe fallback when the maker fails or exhausts its retries: never an LLM output.\n// Easy version of the planned session (indoors if it was an outdoor ride); rest if\n// that still breaks a rule. Rest passes every rule by construction.\nfunction safeFallback(context, config) {\n  const rest = { sport: 'rest', duration_min: 0, intensity: 'easy', location: 'none',\n    focus: 'Rest day', changed_from_plan: true, rationale: 'Safe fallback: rest.' };\n  const planned = context.planned;\n  if (!planned || planned.sport === 'rest') return { ...rest, changed_from_plan: false };\n  const easy = {\n    sport: planned.sport,\n    duration_min: planned.duration_min,\n    intensity: 'easy',\n    location: planned.sport === 'bike' ? 'trainer' : planned.location,\n    focus: `Easy ${planned.sport}`,\n    changed_from_plan: true,\n    rationale: 'Safe fallback: easy version of the planned session.',\n  };\n  return checkProposal(easy, context, config).passed ? easy : rest;\n}\n\n\n// --- n8n wrapper: deterministic safe session, re-checked so the fallback is provably within the rules\nconst s = $input.first().json;\nconst proposal = safeFallback(s.context, s.guardrails);\nconst verdict = checkProposal(proposal, s.context, s.guardrails);\nreturn [{ json: { run: s.run, context: s.context, rules_version: s.rules_version, attempts: s.attempts,\n  final: { origin: 'fallback', proposal, verdict } } }];\n"
@@ -633,8 +633,8 @@
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
       "position": [
-        4600,
-        80
+        2180,
+        1080
       ],
       "parameters": {}
     },
@@ -644,8 +644,8 @@
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        4780,
-        -260
+        -20,
+        1740
       ],
       "parameters": {
         "content": "## 3 \u00b7 Human in the loop + audit log\nThe run, every LLM call and verdict are logged before asking. Telegram buttons resume this execution via its signed URL. Nothing is scheduled without an answer.",
@@ -660,8 +660,8 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        4840,
-        80
+        40,
+        2080
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -684,8 +684,8 @@
       "type": "n8n-nodes-base.readWriteFile",
       "typeVersion": 1,
       "position": [
-        5040,
-        80
+        240,
+        2080
       ],
       "parameters": {
         "operation": "read",
@@ -700,8 +700,8 @@
       "type": "n8n-nodes-base.extractFromFile",
       "typeVersion": 1,
       "position": [
-        5240,
-        80
+        440,
+        2080
       ],
       "parameters": {
         "operation": "fromJson",
@@ -714,8 +714,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        5440,
-        80
+        640,
+        2080
       ],
       "parameters": {
         "jsCode": "// Human-in-the-loop: the approval message and what each answer does.\n// Nothing is scheduled until a human answers; no answer means no action.\n\nconst DECISIONS = ['approve', 'lighter', 'rest'];\nconst PRICE_PER_MTOK = { 'claude-haiku-5-5': { input: 0.1, output: 0.5 } }; // display only; Postgres model_pricing is the source of truth\nconst REST = { sport: 'rest', duration_min: 0, intensity: 'easy', location: 'none', focus: 'Rest day' };\n\nfunction esc(s) {\n  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n}\n\nfunction runCost(attempts) {\n  let input = 0, output = 0, usd = 0;\n  for (const a of attempts) {\n    const c = a.call || {};\n    const p = PRICE_PER_MTOK[c.model];\n    input += c.input_tokens || 0;\n    output += c.output_tokens || 0;\n    if (p) usd += ((c.input_tokens || 0) * p.input + (c.output_tokens || 0) * p.output) / 1e6;\n  }\n  return { input, output, usd };\n}\n\nfunction describe(s) {\n  if (!s || s.sport === 'rest') return 'Rest';\n  return `${s.sport} \u00b7 ${s.duration_min} min \u00b7 ${s.intensity} \u00b7 ${s.location}`;\n}\n\nfunction formatApproval({ run, context, final, attempts }) {\n  const p = final.proposal;\n  const r = context.recovery, l = context.load, w = context.weather;\n  const cost = runCost(attempts);\n  const rejections = attempts.filter((a) => !a.verdict.passed).length;\n  const lines = [\n    `<b>Training Copilot \u00b7 ${esc(run.target_date)} (${esc(context.weekday)})</b>`,\n    run.data_source === 'scenario' ? `<i>Test scenario: ${esc(run.scenario_id)}</i>` : '',\n    '',\n    `<b>Proposed:</b> ${esc(describe(p))}`,\n    p.sport !== 'rest' ? `<b>Focus:</b> ${esc(p.focus)}` : '',\n    `<b>Planned:</b> ${esc(describe(context.planned))}`,\n    '',\n    `<b>Why:</b> ${esc(p.rationale)}`,\n    '',\n    `HRV ${r.hrv_vs_baseline_pct ?? 'n/a'}% vs baseline \u00b7 RHR ${r.resting_hr_vs_baseline_bpm ?? 'n/a'} bpm \u00b7 sleep ${r.sleep_hours ?? 'n/a'} h`,\n    `TSB ${l.tsb ?? 'n/a'} \u00b7 load ${l.load_change_pct ?? 'n/a'}% wk/wk \u00b7 ${l.days_since_rest} days since rest`,\n    `Weather: ${w.temp_min_c ?? '?'}\u2013${w.temp_max_c ?? '?'}\u00b0C, rain ${w.precip_mm ?? '?'} mm, gusts ${w.gust_max_kmh ?? '?'} km/h`,\n    '',\n    final.origin === 'fallback'\n      ? `\u26a0\ufe0f <b>Safe fallback</b> (agent failed after ${attempts.length} attempt${attempts.length > 1 ? 's' : ''})`\n      : `\u2705 Passed guardrails${rejections ? ` after ${rejections} rejection${rejections > 1 ? 's' : ''}` : ''}`,\n    `<i>${attempts.length} LLM call${attempts.length > 1 ? 's' : ''} \u00b7 ${cost.input}+${cost.output} tokens \u00b7 $${cost.usd.toFixed(5)}</i>`,\n  ];\n  return lines.filter((x, i, a) => x !== '' || a[i - 1] !== '').join('\\n').trim();\n}\n\n// Buttons are links to this execution's signed resume URL\nfunction approvalButtons(resumeUrl) {\n  const sep = resumeUrl.includes('?') ? '&' : '?';\n  const labels = { approve: '\u2705 Approve', lighter: '\ud83e\udeb6 Lighter', rest: '\ud83d\ude34 Rest' };\n  return DECISIONS.map((d) => ({ text: labels[d], url: `${resumeUrl}${sep}decision=${d}` }));\n}\n\nconst STEP_DOWN = { hard: 'moderate', moderate: 'easy' };\n\n// Deterministic: the human picks, code applies. \"Lighter\" = one intensity level\n// down; an easy session becomes rest.\nfunction applyDecision(decision, proposal) {\n  if (decision == null) return { decision: 'no_response', session: null, origin: null };\n  if (!DECISIONS.includes(decision)) throw new Error(`Unknown decision: ${decision}`);\n  if (decision === 'approve') return { decision, session: proposal, origin: null };\n  if (decision === 'rest' || proposal.sport === 'rest' || !STEP_DOWN[proposal.intensity]) {\n    return { decision, session: { ...REST }, origin: 'human_rest' };\n  }\n  return {\n    decision,\n    session: { ...proposal, intensity: STEP_DOWN[proposal.intensity], focus: `${proposal.focus} (lighter)` },\n    origin: 'human_lighter',\n  };\n}\n\n\n// --- n8n wrapper: message text + three signed resume-URL buttons\nconst s = $('Proposal ready').first().json;\nconst settings = $input.first().json.data;\nreturn [{ json: {\n  run_id: $('Log proposal').first().json.run_id,\n  chat_id: String(settings.telegram_chat_id),\n  timeout_min: Number(settings.approval_timeout_min) || 180,\n  requested_at: new Date().toISOString(),\n  text: formatApproval(s),\n  buttons: approvalButtons($execution.resumeUrl),\n} }];\n"
@@ -727,8 +727,8 @@
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
       "position": [
-        5640,
-        80
+        840,
+        2080
       ],
       "parameters": {
         "chatId": "={{ $json.chat_id }}",
@@ -783,8 +783,8 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        5840,
-        80
+        1040,
+        2080
       ],
       "parameters": {
         "resume": "webhook",
@@ -804,8 +804,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        6040,
-        80
+        1240,
+        2080
       ],
       "parameters": {
         "jsCode": "// Human-in-the-loop: the approval message and what each answer does.\n// Nothing is scheduled until a human answers; no answer means no action.\n\nconst DECISIONS = ['approve', 'lighter', 'rest'];\nconst PRICE_PER_MTOK = { 'claude-haiku-5-5': { input: 0.1, output: 0.5 } }; // display only; Postgres model_pricing is the source of truth\nconst REST = { sport: 'rest', duration_min: 0, intensity: 'easy', location: 'none', focus: 'Rest day' };\n\nfunction esc(s) {\n  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n}\n\nfunction runCost(attempts) {\n  let input = 0, output = 0, usd = 0;\n  for (const a of attempts) {\n    const c = a.call || {};\n    const p = PRICE_PER_MTOK[c.model];\n    input += c.input_tokens || 0;\n    output += c.output_tokens || 0;\n    if (p) usd += ((c.input_tokens || 0) * p.input + (c.output_tokens || 0) * p.output) / 1e6;\n  }\n  return { input, output, usd };\n}\n\nfunction describe(s) {\n  if (!s || s.sport === 'rest') return 'Rest';\n  return `${s.sport} \u00b7 ${s.duration_min} min \u00b7 ${s.intensity} \u00b7 ${s.location}`;\n}\n\nfunction formatApproval({ run, context, final, attempts }) {\n  const p = final.proposal;\n  const r = context.recovery, l = context.load, w = context.weather;\n  const cost = runCost(attempts);\n  const rejections = attempts.filter((a) => !a.verdict.passed).length;\n  const lines = [\n    `<b>Training Copilot \u00b7 ${esc(run.target_date)} (${esc(context.weekday)})</b>`,\n    run.data_source === 'scenario' ? `<i>Test scenario: ${esc(run.scenario_id)}</i>` : '',\n    '',\n    `<b>Proposed:</b> ${esc(describe(p))}`,\n    p.sport !== 'rest' ? `<b>Focus:</b> ${esc(p.focus)}` : '',\n    `<b>Planned:</b> ${esc(describe(context.planned))}`,\n    '',\n    `<b>Why:</b> ${esc(p.rationale)}`,\n    '',\n    `HRV ${r.hrv_vs_baseline_pct ?? 'n/a'}% vs baseline \u00b7 RHR ${r.resting_hr_vs_baseline_bpm ?? 'n/a'} bpm \u00b7 sleep ${r.sleep_hours ?? 'n/a'} h`,\n    `TSB ${l.tsb ?? 'n/a'} \u00b7 load ${l.load_change_pct ?? 'n/a'}% wk/wk \u00b7 ${l.days_since_rest} days since rest`,\n    `Weather: ${w.temp_min_c ?? '?'}\u2013${w.temp_max_c ?? '?'}\u00b0C, rain ${w.precip_mm ?? '?'} mm, gusts ${w.gust_max_kmh ?? '?'} km/h`,\n    '',\n    final.origin === 'fallback'\n      ? `\u26a0\ufe0f <b>Safe fallback</b> (agent failed after ${attempts.length} attempt${attempts.length > 1 ? 's' : ''})`\n      : `\u2705 Passed guardrails${rejections ? ` after ${rejections} rejection${rejections > 1 ? 's' : ''}` : ''}`,\n    `<i>${attempts.length} LLM call${attempts.length > 1 ? 's' : ''} \u00b7 ${cost.input}+${cost.output} tokens \u00b7 $${cost.usd.toFixed(5)}</i>`,\n  ];\n  return lines.filter((x, i, a) => x !== '' || a[i - 1] !== '').join('\\n').trim();\n}\n\n// Buttons are links to this execution's signed resume URL\nfunction approvalButtons(resumeUrl) {\n  const sep = resumeUrl.includes('?') ? '&' : '?';\n  const labels = { approve: '\u2705 Approve', lighter: '\ud83e\udeb6 Lighter', rest: '\ud83d\ude34 Rest' };\n  return DECISIONS.map((d) => ({ text: labels[d], url: `${resumeUrl}${sep}decision=${d}` }));\n}\n\nconst STEP_DOWN = { hard: 'moderate', moderate: 'easy' };\n\n// Deterministic: the human picks, code applies. \"Lighter\" = one intensity level\n// down; an easy session becomes rest.\nfunction applyDecision(decision, proposal) {\n  if (decision == null) return { decision: 'no_response', session: null, origin: null };\n  if (!DECISIONS.includes(decision)) throw new Error(`Unknown decision: ${decision}`);\n  if (decision === 'approve') return { decision, session: proposal, origin: null };\n  if (decision === 'rest' || proposal.sport === 'rest' || !STEP_DOWN[proposal.intensity]) {\n    return { decision, session: { ...REST }, origin: 'human_rest' };\n  }\n  return {\n    decision,\n    session: { ...proposal, intensity: STEP_DOWN[proposal.intensity], focus: `${proposal.focus} (lighter)` },\n    origin: 'human_lighter',\n  };\n}\n\n\n// --- n8n wrapper: resumed by a button (query.decision) or by the timeout (no query)\nconst s = $('Proposal ready').first().json;\nconst req = $('Build approval message').first().json;\nconst sent = $('Ask for approval').first().json;\nconst query = $input.first().json.query;\nconst result = applyDecision(query ? query.decision : null, s.final.proposal);\nconst labels = { approve: '\u2705 Approved', lighter: '\ud83e\udeb6 Lighter', rest: '\ud83d\ude34 Rest', no_response: '\u231b No answer' };\nconst outcome = result.session\n  ? `${labels[result.decision]} \u2192 <b>${result.session.sport === 'rest' ? 'Rest' : `${result.session.sport} \u00b7 ${result.session.duration_min} min \u00b7 ${result.session.intensity} \u00b7 ${result.session.location}`}</b>`\n  : `${labels.no_response} within ${req.timeout_min} min: nothing scheduled`;\nreturn [{ json: {\n  run_id: req.run_id, target_date: s.run.target_date, requested_at: req.requested_at,\n  decision: result.decision, session: result.session, origin: result.origin || s.final.origin,\n  telegram_message_id: (sent.result || sent).message_id, chat_id: req.chat_id,\n  resumed_by_button: !!query,\n  confirmation: `${req.text}\\n\\n<b>Decision:</b> ${outcome}`,\n} }];\n"
@@ -817,8 +817,8 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        6240,
-        80
+        1440,
+        2080
       ],
       "parameters": {
         "operation": "executeQuery",
@@ -841,8 +841,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        6440,
-        80
+        1640,
+        2080
       ],
       "parameters": {
         "conditions": {
@@ -875,8 +875,8 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        6660,
-        -20
+        1860,
+        1980
       ],
       "parameters": {
         "respondWith": "text",
@@ -899,8 +899,8 @@
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
       "position": [
-        6880,
-        80
+        2080,
+        2080
       ],
       "parameters": {
         "resource": "message",
